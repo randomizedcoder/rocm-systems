@@ -11,6 +11,9 @@ Checks: >
   bugprone-*,
   cert-*,
   clang-analyzer-*,
+  clang-diagnostic-switch,
+  clang-diagnostic-switch-enum,
+  concurrency-*,
   cppcoreguidelines-*,
   misc-*,
   modernize-*,
@@ -35,6 +38,12 @@ Checks: >
 HeaderFilterRegex: '(projects|experimental|shared)/.*'
 
 WarningsAsErrors: ''
+
+# Pass -Wswitch-enum to the compiler so clang-diagnostic-switch-enum fires.
+# This catches missing enum cases in switch statements even when a default exists.
+ExtraArgs:
+  - '-Wswitch-enum'
+  - '-Wswitch'
 
 # Naming conventions (relaxed for compatibility with existing codebase)
 CheckOptions:

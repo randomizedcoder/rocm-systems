@@ -37,9 +37,25 @@ rules:
   # Detects: if (type == X) { return; } followed by code that assumes
   # the only other possibility. This is the other side of the doorbell bug.
 
-  # DISABLED: type-check-early-return-no-validation
-  # Produced 18,749 findings -- too noisy without type info.
-  # Semgrep can't distinguish discriminators from general conditionals.
+  - id: type-check-early-return-no-validation
+    pattern: |
+      if ($VAR == $CONST1) {
+        ...
+        return ...;
+      }
+      ...
+      $STMT;
+    message: >
+      Early return for $VAR == $CONST1 leaves remaining code handling
+      all other values implicitly. If $VAR is a discriminator, add
+      validation (assert, error, or explicit check) for the assumed value.
+      This is the exact pattern of the doorbell type 1 bug.
+    languages: [cpp, c]
+    severity: INFO
+    metadata:
+      note: >
+        High finding count (~18,000). Each finding must be triaged via
+        anomalies.toml. The doorbell type 1 bug IS this pattern.
 
   # ── Pattern 3: Magic number dispatch without exhaustive coverage ───
   # Detects: if (x == 0) { ... } else if (x == 1) { ... } without
@@ -135,9 +151,22 @@ rules:
   # Can't detect #ifdef in semgrep, but we can detect the result:
   # a comparison that checks fewer values than are #defined.
 
-  # DISABLED: partial-define-coverage
-  # Produced 15,007 findings -- matches every single if-equals in the codebase.
-  # Too broad without type resolution to know which variables are discriminators.
+  - id: partial-define-coverage
+    pattern: |
+      if ($VAR == $PREFIX_0) {
+        ...
+      }
+    message: >
+      Single-value check on $VAR -- verify that all defined values of
+      this type are handled. Common in hardware dispatch code where
+      new generations add new type values.
+    languages: [cpp, c]
+    severity: INFO
+    metadata:
+      note: >
+        High finding count (~15,000). Each finding must be triaged via
+        anomalies.toml. Real bugs hide in this volume -- worth the
+        effort to classify each one.
 
   # ── Pattern 8: GFX version dispatch without catch-all ──────────────
   # Specific to ROCm: GFXIP/ASIC version checks that miss generations.

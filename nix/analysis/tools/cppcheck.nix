@@ -22,6 +22,9 @@ let
         --project="$compile_db/compile_commands.json" \
         --enable=all \
         --std=c++17 \
+        --inconclusive \
+        --force \
+        --max-ctu-depth=8 \
         --suppress=missingInclude \
         --suppress=unusedFunction \
         --suppress=unmatchedSuppression \
@@ -35,6 +38,9 @@ let
         --project="$compile_db/compile_commands.json" \
         --enable=all \
         --std=c++17 \
+        --inconclusive \
+        --force \
+        --max-ctu-depth=8 \
         --suppress=missingInclude \
         --suppress=unusedFunction \
         --suppress=unmatchedSuppression \

@@ -9,6 +9,8 @@
 let
   excludes = analysisLib.mkExcludeArgs analysisLib.defaultExcludes;
 
+  baseConfig = ../configs/clang-tidy-base.yaml;
+
   runner = pkgs.writeShellApplication {
     name = "run-clang-tidy";
     runtimeInputs = with pkgs; [ clang-tools coreutils findutils gnugrep parallel ];
@@ -30,23 +32,25 @@ let
       file_count=$(wc -l < "$output_dir/file-list.txt" || echo "0")
       echo "Scanning $file_count source files..."
 
-      # Run clang-tidy with the compilation database
-      # Use run-clang-tidy for parallelism if available, else xargs
-      if command -v run-clang-tidy &>/dev/null; then
-        xargs < "$output_dir/file-list.txt" \
-          run-clang-tidy \
-          -p "$compile_db" \
-          -header-filter='(projects|experimental|shared)/.*' \
-          -quiet \
-          > "$output_dir/report.txt" 2>&1 || true
+      # Determine config: use project's own .clang-tidy if it exists,
+      # otherwise fall back to our base config with comprehensive checks
+      # including -Wswitch-enum for incomplete case handling detection.
+      effective_config="${baseConfig}"
+      if [ -f "$source_dir/.clang-tidy" ]; then
+        effective_config="$source_dir/.clang-tidy"
+        echo "Using project's own .clang-tidy"
       else
-        cat "$output_dir/file-list.txt" | \
-          parallel -j "$(nproc)" \
-            clang-tidy -p "$compile_db" \
-              --header-filter="'(projects|experimental|shared)/.*'" \
-              --quiet {} \
-          > "$output_dir/report.txt" 2>&1 || true
+        echo "Using base config with -Wswitch-enum (project has no .clang-tidy)"
       fi
+
+      # Run clang-tidy with the compilation database
+      xargs < "$output_dir/file-list.txt" \
+        parallel -j "$(nproc)" \
+          clang-tidy -p "$compile_db" \
+            --config-file="$effective_config" \
+            --header-filter="'(projects|experimental|shared)/.*'" \
+            --quiet {} \
+        > "$output_dir/report.txt" 2>&1 || true
 
       findings=$(grep -c ': warning:\|: error:' "$output_dir/report.txt" || echo "0")
       echo "$findings" > "$output_dir/count.txt"

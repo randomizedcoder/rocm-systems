@@ -28,13 +28,22 @@ let
       file_count=$(wc -l < "$output_dir/file-list.txt" || echo "0")
       echo "Type-checking $file_count Python files..."
 
-      xargs < "$output_dir/file-list.txt" \
+      # Run mypy per-file to avoid package name resolution issues.
+      # --strict enables all optional strictness checks.
+      while IFS= read -r pyfile; do
         mypy \
-        --ignore-missing-imports \
-        --no-error-summary \
-        --show-column-numbers \
-        --no-color-output \
-        > "$output_dir/report.txt" 2>&1 || true
+          --strict \
+          --ignore-missing-imports \
+          --no-error-summary \
+          --show-column-numbers \
+          --show-error-codes \
+          --no-color-output \
+          --warn-unused-ignores \
+          --warn-redundant-casts \
+          --warn-unreachable \
+          "$pyfile" \
+          >> "$output_dir/report.txt" 2>&1 || true
+      done < "$output_dir/file-list.txt"
 
       findings=$(grep -c ': error:' "$output_dir/report.txt" || echo "0")
       echo "$findings" > "$output_dir/count.txt"

@@ -28,10 +28,12 @@ let
       file_count=$(wc -l < "$output_dir/file-list.txt" || echo "0")
       echo "Linting $file_count Python files..."
 
-      # Disable import-error since many deps are unavailable in sandbox
+      # Disable import-error since many deps are unavailable in sandbox.
+      # Enable additional pedantic checks for correctness.
       xargs < "$output_dir/file-list.txt" \
         pylint \
         --disable=import-error,no-name-in-module,wrong-import-order \
+        --enable=useless-else-on-loop,simplifiable-if-statement,consider-using-enumerate,consider-using-dict-items,consider-using-f-string,use-implicit-booleaness-not-comparison \
         --output-format=text \
         --score=no \
         > "$output_dir/report.txt" 2>&1 || true
@@ -40,6 +42,7 @@ let
       xargs < "$output_dir/file-list.txt" \
         pylint \
         --disable=import-error,no-name-in-module,wrong-import-order \
+        --enable=useless-else-on-loop,simplifiable-if-statement,consider-using-enumerate,consider-using-dict-items,consider-using-f-string,use-implicit-booleaness-not-comparison \
         --output-format=json \
         --score=no \
         > "$output_dir/report.json" 2>"$output_dir/pylint-stderr.log" || true

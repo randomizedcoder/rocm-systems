@@ -16,9 +16,13 @@ let
 
       echo "=== bandit Analysis ==="
 
+      # Run with all tests, all confidence levels, all severity levels.
+      # Being pedantic: report everything, triage later.
       bandit \
         -r "$source_dir" \
         -f json \
+        --severity-level all \
+        --confidence-level all \
         --exclude='third_party,build,_build,.git,shared/amdgpu-windows-interop' \
         -x '*.pyc' \
         > "$output_dir/report.json" 2>"$output_dir/bandit-stderr.log" || true
@@ -26,6 +30,8 @@ let
       bandit \
         -r "$source_dir" \
         -f txt \
+        --severity-level all \
+        --confidence-level all \
         --exclude='third_party,build,_build,.git,shared/amdgpu-windows-interop' \
         -x '*.pyc' \
         > "$output_dir/report.txt" 2>"$output_dir/bandit-stderr.log" || true

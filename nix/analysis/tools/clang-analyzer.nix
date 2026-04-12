@@ -28,6 +28,10 @@ let
         -print0 | xargs -0 -P "$(nproc)" -I{} \
       clang --analyze \
         -Xanalyzer -analyzer-output=text \
+        -Xanalyzer -analyzer-checker=core,deadcode,security,unix,cplusplus,optin,alpha.core,alpha.deadcode,alpha.security,alpha.cplusplus,alpha.unix \
+        -Xanalyzer -analyzer-config -Xanalyzer aggressive-binary-operation-simplification=true \
+        -Xanalyzer -analyzer-config -Xanalyzer consider-single-element-arrays-as-flexible-array-members=true \
+        -Xanalyzer -analyzer-config -Xanalyzer widen-loops=true \
         -p "$compile_db" \
         {} \
         >> "$output_dir/report.txt" 2>&1 || true

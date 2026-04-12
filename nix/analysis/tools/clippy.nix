@@ -39,7 +39,10 @@ let
         cargo clippy \
           --all-targets \
           --message-format=short \
-          -- -W clippy::all -W clippy::pedantic \
+          -- -W clippy::all -W clippy::pedantic -W clippy::nursery \
+             -W clippy::cargo \
+             -W clippy::unwrap_used \
+             -W clippy::expect_used \
           >> "$output_dir/report.txt" 2>&1 || true
         cd - > /dev/null
         rm -rf "$workdir"

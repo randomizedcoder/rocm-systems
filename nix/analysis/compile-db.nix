@@ -101,7 +101,7 @@ let
                 continue
 
         for entry in db:
-            fpath = entry.get('file', '')
+            fpath = entry.get('file', ''')
             if fpath not in seen_files:
                 seen_files.add(fpath)
                 merged.append(entry)
