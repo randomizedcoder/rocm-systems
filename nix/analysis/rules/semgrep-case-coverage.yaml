@@ -1,0 +1,188 @@
+rules:
+  # ════════════════════════════════════════════════════════════════════
+  # Case Coverage / Incomplete Dispatch Detection Rules
+  #
+  # These rules detect the "missing case" bug class: code that dispatches
+  # on a type/kind/mode discriminator but doesn't cover all valid values.
+  #
+  # Motivation: rocr-runtime's doorbell type 1 handling was silently
+  # removed, leaving only type 2 functional. No static analysis tool
+  # caught this. These rules detect the PATTERNS that lead to such bugs.
+  # ════════════════════════════════════════════════════════════════════
+
+  # ── Pattern 1: Bare equality check without else ────────────────────
+  # Detects: if (type == SPECIFIC_VALUE) { ... } with no else clause.
+  # This is the exact doorbell pattern: if (doorbell_type_ == 2) { ... }
+  # with the implicit assumption that no other value is possible.
+
+  - id: type-check-no-else
+    patterns:
+      - pattern: |
+          if ($VAR == $CONST) { ... }
+      - pattern-not: |
+          if ($VAR == $CONST) { ... } else { ... }
+      - pattern-not: |
+          if ($VAR == $CONST) { ... return ...; }
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ".*(type|kind|mode|version|format|class|variant|style|method|scheme|family|gen|gfxip|asic).*"
+    message: >
+      if ($VAR == $CONST) without else clause -- if $VAR is a discriminator,
+      other valid values are silently ignored. Consider adding an else clause
+      with an assert/error, or use a switch with default.
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Pattern 2: Type check returns/continues, rest assumes single type ─
+  # Detects: if (type == X) { return; } followed by code that assumes
+  # the only other possibility. This is the other side of the doorbell bug.
+
+  # DISABLED: type-check-early-return-no-validation
+  # Produced 18,749 findings -- too noisy without type info.
+  # Semgrep can't distinguish discriminators from general conditionals.
+
+  # ── Pattern 3: Magic number dispatch without exhaustive coverage ───
+  # Detects: if (x == 0) { ... } else if (x == 1) { ... } without
+  # handling the full range. Only flags when we see numbered constants.
+
+  - id: incomplete-numeric-dispatch
+    pattern: |
+      if ($VAR == 0) {
+        ...
+      } else if ($VAR == 1) {
+        ...
+      }
+    message: >
+      Numeric dispatch on $VAR handles values 0 and 1 but has no else/default
+      for other values. If more valid values exist, they are silently ignored.
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: incomplete-numeric-dispatch-2
+    pattern: |
+      if ($VAR == 1) {
+        ...
+      } else if ($VAR == 2) {
+        ...
+      }
+    message: >
+      Numeric dispatch on $VAR handles values 1 and 2 but has no else/default
+      for other values. Value 0 and values >2 are silently ignored.
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Pattern 4: Switch on known enum types without default ──────────
+  # These target specific ROCm enum types known to have multiple values.
+
+  - id: switch-no-default-on-type
+    patterns:
+      - pattern: |
+          switch ($VAR) {
+            case $A: ...
+          }
+      - pattern-not: |
+          switch ($VAR) {
+            ...
+            default: ...
+          }
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ".*(type|kind|mode|state|format).*"
+    message: >
+      switch on discriminator variable '$VAR' has no default case.
+      If new enum values are added, they will be silently ignored.
+      Add 'default: assert(false && "unhandled case");' or handle explicitly.
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Pattern 5: Enum comparison that only checks one value ──────────
+  # Flags patterns like: assert(signal->kind == AMD_SIGNAL_KIND_USER)
+  # where the assert assumes only one kind exists.
+
+  - id: assert-single-enum-value
+    patterns:
+      - pattern-either:
+          - pattern: assert($VAR == $CONST)
+          - pattern: "assert($OBJ->$FIELD == $CONST)"
+          - pattern: assert($OBJ.$FIELD == $CONST)
+      - metavariable-regex:
+          metavariable: $CONST
+          regex: ".*(_KIND_|_TYPE_|_MODE_|_STATE_|_FORMAT_).*"
+    message: >
+      Assert checks single enum value $CONST -- if the enum has other
+      valid values, this will crash instead of handling them gracefully.
+      Consider a switch or if-else chain that handles all cases.
+    languages: [cpp, c]
+    severity: INFO
+
+  # ── Pattern 6: Ternary on type with only two branches ──────────────
+  # Detects: (type == X) ? a : b -- assumes only two possible values.
+
+  - id: ternary-type-dispatch
+    patterns:
+      - pattern: "($VAR == $CONST) ? $A : $B"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ".*(type|kind|mode|version|format).*"
+    message: >
+      Ternary on discriminator $VAR assumes exactly two values.
+      If $VAR can take more values, the else branch handles them all
+      identically which may not be correct.
+    languages: [cpp, c]
+    severity: INFO
+
+  # ── Pattern 7: #ifdef removing a case without adding validation ────
+  # Can't detect #ifdef in semgrep, but we can detect the result:
+  # a comparison that checks fewer values than are #defined.
+
+  # DISABLED: partial-define-coverage
+  # Produced 15,007 findings -- matches every single if-equals in the codebase.
+  # Too broad without type resolution to know which variables are discriminators.
+
+  # ── Pattern 8: GFX version dispatch without catch-all ──────────────
+  # Specific to ROCm: GFXIP/ASIC version checks that miss generations.
+
+  - id: gfxip-incomplete-dispatch
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if ($VAR == $GFX1) { ... } else if ($VAR == $GFX2) { ... }
+          - pattern: |
+              if ($STR.find($GFX1) ...) { ... } else if ($STR.find($GFX2) ...) { ... }
+      - pattern-not: |
+          if (...) { ... } else if (...) { ... } else { ... }
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ".*(gfx|asic|chip|gpu|gen|ip).*"
+    message: >
+      GPU generation dispatch on $VAR without catch-all else clause.
+      When a new GPU generation is released, this code will silently
+      do nothing for it. Add an else clause that errors or uses a default.
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Pattern 9: Deprecated value removal without validation ─────────
+  # Detects the pattern where code was clearly simplified from multi-case
+  # to single-case but lacks input validation.
+
+  - id: unconditional-after-type-member
+    patterns:
+      - pattern: |
+          $TYPE $VAR = $OBJ.$FIELD;
+          ...
+          $FUNC($VAR, ...);
+      - pattern-not: |
+          $TYPE $VAR = $OBJ.$FIELD;
+          ...
+          if ($VAR ...) { ... }
+          ...
+          $FUNC($VAR, ...);
+      - metavariable-regex:
+          metavariable: $FIELD
+          regex: ".*(type|kind|mode|Type|Kind|Mode).*"
+    message: >
+      Type/kind/mode field '$FIELD' read from object but never validated
+      before use. If this discriminator has defined invalid values, they
+      will be passed through silently. Add validation after reading.
+    languages: [cpp, c]
+    severity: INFO

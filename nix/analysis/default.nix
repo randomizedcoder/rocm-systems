@@ -22,6 +22,7 @@ let
   flawfinder = import ./tools/flawfinder.nix { inherit pkgs lib src analysisLib; };
   cpplint = import ./tools/cpplint.nix { inherit pkgs lib src analysisLib; };
   semgrep-cpp = import ./tools/semgrep-cpp.nix { inherit pkgs lib src analysisLib; };
+  semgrep-case-coverage = import ./tools/semgrep-case-coverage.nix { inherit pkgs lib src analysisLib; };
   coccinelle = import ./tools/coccinelle.nix { inherit pkgs lib src analysisLib; };
 
   # C/C++ compile-db tools
@@ -56,7 +57,7 @@ let
   # All individual tools as an attrset
   tools = {
     inherit
-      flawfinder cpplint semgrep-cpp coccinelle
+      flawfinder cpplint semgrep-cpp semgrep-case-coverage coccinelle
       clang-tidy cppcheck iwyu clang-analyzer
       gcc-warnings gcc-analyzer
       hip-check
