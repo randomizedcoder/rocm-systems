@@ -20,7 +20,7 @@ Each issue was scored on four dimensions:
 
 ---
 
-## Issue #1: CI Script Command Injection via PR Branch Names
+## Issue #1: CI Script Command Injection via PR Branch Names — [Full Analysis](analysis-reports/critical/01-ci-command-injection.md)
 
 **Severity**: CRITICAL
 **File**: `.github/scripts/import_subrepo_prs.py:68`
@@ -62,7 +62,7 @@ Also affects: `pr_category_label.py:91,96,97`, `pr_detect_changed_subtrees.py:11
 
 ---
 
-## Issue #2: HMAC Key File Permission Race (TOCTOU) in cuid Daemon
+## Issue #2: HMAC Key File Permission Race (TOCTOU) in cuid Daemon — [Full Analysis](analysis-reports/critical/02-cuid-chmod-toctou.md)
 
 **Severity**: CRITICAL
 **File**: `projects/cuid/lib/src/hmac.cc:163`
@@ -97,7 +97,7 @@ Also affects: `cuid/lib/src/cuid_file.cc:606,609`, `amdsmi/rocm_smi/src/rocm_smi
 
 ---
 
-## Issue #3: Buffer Overflow via sscanf Without Width Limits in amdsmi
+## Issue #3: Buffer Overflow via sscanf Without Width Limits in amdsmi — [Full Analysis](analysis-reports/critical/03-sscanf-buffer-overflow.md)
 
 **Severity**: HIGH
 **Files**: `projects/amdsmi/rocm_smi/src/rocm_smi.cc:7146,7325` + 20 more locations
@@ -133,7 +133,7 @@ Full list of affected locations (22 total):
 
 ---
 
-## Issue #4: memcpy Copying Pointer Size Instead of Data (100 locations)
+## Issue #4: memcpy Copying Pointer Size Instead of Data (100 locations) — [Full Analysis](analysis-reports/critical/04-memcpy-sizeof-pointer.md)
 
 **Severity**: HIGH
 **Files**: 100 locations across multiple projects
@@ -160,7 +160,7 @@ Review each instance. Change `sizeof(ptr)` to `sizeof(*ptr)` or `n * sizeof(elem
 
 ---
 
-## Issue #5: Dangling .c_str() — Use-After-Free (59 locations)
+## Issue #5: Dangling .c_str() — Use-After-Free (59 locations) — [Full Analysis](analysis-reports/critical/05-dangling-cstr.md)
 
 **Severity**: HIGH
 **Files**: 59 locations across multiple projects
@@ -193,7 +193,7 @@ use(name.c_str());
 
 ---
 
-## Issue #6: Unchecked HIP API Returns in Core Runtime (clr, rccl, rocshmem)
+## Issue #6: Unchecked HIP API Returns in Core Runtime (clr, rccl, rocshmem) — [Full Analysis](analysis-reports/critical/06-unchecked-hip-returns.md)
 
 **Severity**: HIGH
 **Files**: ~300 non-test locations in clr (150), rccl (128), rocshmem (74)
@@ -230,7 +230,7 @@ HIP_CHECK(hipMalloc(&dev_ptr, size));
 
 ---
 
-## Issue #7: HIP Double-Free on GPU Memory (11 locations)
+## Issue #7: HIP Double-Free on GPU Memory (11 locations) — [Full Analysis](analysis-reports/critical/07-hip-double-free.md)
 
 **Severity**: HIGH
 **Files**: 11 locations, primarily in hip-tests but pattern may exist in runtime
@@ -259,7 +259,7 @@ Or use RAII wrappers that prevent double-free by design.
 
 ---
 
-## Issue #8: SSL Certificate Verification Disabled in LLM Client
+## Issue #8: SSL Certificate Verification Disabled in LLM Client — [Full Analysis](analysis-reports/critical/08-ssl-verify-disabled.md)
 
 **Severity**: HIGH
 **File**: `experimental/python/rocinsight/rocinsight/ai_analysis/interactive.py:4324`
@@ -291,7 +291,7 @@ client = httpx.Client(verify=verify)
 
 ---
 
-## Issue #9: Thread-Unsafe Functions in Multi-Threaded GPU Runtime
+## Issue #9: Thread-Unsafe Functions in Multi-Threaded GPU Runtime — [Full Analysis](analysis-reports/critical/09-thread-unsafe-functions.md)
 
 **Severity**: MEDIUM-HIGH
 **Files**: 121 `strtok` + 86 `strerror` = 207 locations
@@ -323,7 +323,7 @@ char buf[256]; strerror_r(errno, buf, sizeof(buf));  // thread-safe
 
 ---
 
-## Issue #10: strncat Buffer Overflow in hip-tests
+## Issue #10: strncat Buffer Overflow in hip-tests — [Full Analysis](analysis-reports/critical/10-strncat-overflow.md)
 
 **Severity**: MEDIUM-HIGH
 **Files**: `projects/hip-tests/catch/unit/device/hipDeviceGetUuid.cc:150,240`, `getUUIDfrmRocinfo_Exe.cc:30`
