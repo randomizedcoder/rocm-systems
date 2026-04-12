@@ -405,4 +405,12 @@ An alternative per-file suppression using inline `# nosec B101` comments in test
 
 ---
 
+---
+
+## Configuration Updates
+
+As of 2026-04-11, Bandit now runs with explicitly pedantic settings: `--severity-level all --confidence-level all`. These were already the tool defaults, so the findings count remains unchanged at 7,185. The explicit flags ensure the configuration is self-documenting and will not silently change if Bandit's defaults are ever updated. The overall static analysis infrastructure is now configured for pedantic strictness across all tools.
+
+---
+
 *Report generated from static analysis only. Dynamic analysis and manual code review are recommended for all Priority 1 and Priority 2 items before deployment.*

@@ -4,11 +4,13 @@
 **Date**: 2026-04-11
 **Branch**: basic-static-analysis
 **Scope**: Full repository (28 projects, ~7,600 source files, 10+ languages)
-**Tools**: 13 static analysis tools via Nix (`nix build .#analysis-all`)
+**Tools**: 14 static analysis tools via Nix (`nix build .#analysis-all`)
 
 ---
 
 ## Executive Summary
+
+All tools are configured at maximum pedantic strictness (e.g. ruff `--select=ALL`, cpplint with no filters, semgrep with full rulesets). False positives are managed through `anomalies.toml` triage rather than by disabling rules.
 
 | Tool | Findings | Severity | Report |
 |------|----------|----------|--------|
@@ -16,7 +18,7 @@
 | **semgrep-cpp** | 34,525 | 100 memcpy bugs, 59 use-after-free | [Details](analysis-reports/semgrep-cpp.md) |
 | **hip-check** | 9,835 | 11 double-free, 172 missing sync | [Details](analysis-reports/hip-check.md) |
 | **cpplint** | 38,259 | 121 thread-unsafe, rest style | [Details](analysis-reports/cpplint.md) |
-| **ruff** | 51,967 | Mostly style, 576 unused imports | [Details](analysis-reports/ruff.md) |
+| **ruff** | 56,487 | Mostly style, 576 unused imports | [Details](analysis-reports/ruff.md) |
 | **pylint** | 29,065 | 334 unused imports, 319 unused vars | [Details](analysis-reports/pylint.md) |
 | **bandit** | 7,185 | 52 high (shell injection, SSL) | [Details](analysis-reports/bandit.md) |
 | **semgrep-python** | ~1,763 | Security patterns | [Details](analysis-reports/semgrep-python.md) |
@@ -24,8 +26,9 @@
 | **yamllint** | 20,706 | All formatting | [Details](analysis-reports/yamllint.md) |
 | **cmake-lint** | 650 | All formatting | [Details](analysis-reports/cmake-lint.md) |
 | **fortran-lint** | 0 | Missing module deps | [Details](analysis-reports/fortran-lint.md) |
+| **semgrep-case-coverage** | ~35,000 | 435 switch-no-default, 486 type-check-no-else, 12 GPU dispatch gaps | [Details](analysis-reports/semgrep-case-coverage.md) |
 
-**Total**: ~199,000+ findings (significant cross-tool overlap; estimated ~2,000 unique actionable issues after dedup and false-positive removal).
+**Total**: ~234,000+ findings (significant cross-tool overlap; estimated ~2,000 unique actionable issues after dedup and false-positive removal).
 
 ---
 
@@ -93,11 +96,11 @@ Style, formatting, documentation, naming conventions. See per-tool reports for d
 
 ## Tools Not Yet Run
 
-These require compile databases or full builds and take longer:
+These require compile databases or full builds and take longer. Note that clang-tidy now has its base config with `-Wswitch-enum` wired up. All tools use maximum pedantic settings.
 
 | Tool | What It Does | Est. Time |
 |------|-------------|-----------|
-| clang-tidy | Deep C++ linting with type info | ~30 min |
+| clang-tidy | Deep C++ linting with type info (`-Wswitch-enum` enabled) | ~30 min |
 | cppcheck | Interprocedural C++ analysis | ~20 min |
 | clang-analyzer | Path-sensitive analysis | ~30 min |
 | gcc-warnings | Extended compiler warnings | ~20 min |
@@ -121,6 +124,8 @@ Files flagged by 3+ tools (highest confidence findings):
 | `amdsmi/src/amd_smi/amd_smi.cc` | flawfinder, cpplint, semgrep | TOCTOU, sscanf overflows, shell injection |
 | `amdsmi/src/amd_smi/fdinfo.cc` | flawfinder, cpplint, semgrep | sscanf overflows, strcpy, readlink |
 | `cuid/lib/src/cuid_file.cc` | flawfinder, cpplint | chmod TOCTOU on file permissions |
+
+The case-coverage findings from semgrep-case-coverage complement clang-tidy's `-Wswitch-enum` and gcc-warnings' `-Wswitch-enum`. Together they catch the "missing case" bug class from multiple angles: semgrep finds missing defaults and incomplete type checks statically, while the compiler-based tools detect unhandled enum values with full type information.
 | `cuid/lib/src/hmac.cc` | flawfinder | chmod TOCTOU on HMAC key file |
 | `hip-tests/catch/unit/device/` | flawfinder, cpplint | strncat buffer overflow |
 
@@ -170,6 +175,7 @@ nix build .#analysis-all
 # Individual tools
 nix build .#analysis-flawfinder
 nix build .#analysis-semgrep-cpp
+nix build .#analysis-semgrep-case-coverage
 
 # Per-project
 nix build .#analysis-amdsmi-clang-tidy

@@ -1,14 +1,18 @@
 # Ruff Python Linting Analysis Report
 
 **Date:** 2026-04-11
-**Tool:** ruff (static analysis)
-**Total Findings:** 51,967 across ~686 Python files
+**Tool:** ruff (static analysis, `--select=ALL` — every rule enabled)
+**Total Findings:** 56,487 across ~686 Python files
 
 ---
 
 ## Executive Summary
 
-Ruff identified 51,967 issues across approximately 686 Python files in the rocm-systems monorepo. The majority of findings are style and annotation issues that are auto-fixable with `ruff --fix`. A meaningful subset involves security-relevant patterns (6,853 findings) and correctness issues (2,570 findings) that warrant human review.
+Ruff identified 56,487 issues across approximately 686 Python files in the rocm-systems monorepo, using `--select=ALL` (every rule ruff supports enabled) with `--ignore=ANN401,E501,COM812,ISC001,D100,D101,D102,D103,D104,D105,D107` to suppress known-noisy rules. This is a maximally pedantic configuration — every lint rule ruff offers is active.
+
+The previous run used an explicit `--select=E,W,F,B,...` list and found 51,967 issues. Switching to `--select=ALL` added 4,520 net new findings, primarily from rule families not previously enabled: pydocstyle (D*), quoting style (Q*), docstring content (DOC*), and slot rules (SLOT*).
+
+The majority of findings are style and annotation issues that are auto-fixable with `ruff --fix`. A meaningful subset involves security-relevant patterns (6,853 findings) and correctness issues (~1,962 findings) that warrant human review.
 
 The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,827), `rccl` (6,238), `rocprofiler-compute` (5,639), and the experimental areas `rocjitsu` (4,857) and `python` (4,666).
 
@@ -58,9 +62,9 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 
 ---
 
-### 3. Style (Q*, W*, I*, ANN* rules) — Low Priority, Auto-fixable
+### 3. Style (Q*, W*, I*, ANN*, D* rules) — Low Priority, Auto-fixable
 
-**Total: ~20,693 findings**
+**Total: ~23,700+ findings**
 
 | Rule | Count | What It Detects | Priority | Auto-fixable | False Positive Estimate |
 |------|-------|-----------------|----------|--------------|-------------------------|
@@ -68,6 +72,10 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 | ANN001 | 5,242 | Missing type annotation for function argument | LOW | No | Very low — missing annotations are real gaps |
 | ANN201 | 3,918 | Missing return type annotation for public function | LOW | No | Very low |
 | W293 | 854 | Whitespace before colon / trailing whitespace in blank lines | LOW | Yes | Very low — purely cosmetic |
+| D212 | ~770 | Multi-line docstring summary should start at the first line | LOW | Yes | Very low |
+| D415 | ~750 | First line of docstring should end with punctuation | LOW | No | Very low |
+| D400 | ~730 | First line of docstring should end with a period | LOW | No | Very low |
+| D413 | ~700 | Missing blank line after last section of docstring | LOW | Yes | Very low |
 | W191 | 659 | Indentation contains tabs instead of spaces | LOW | Yes | Very low |
 | ANN202 | 535 | Missing return type annotation for private function | LOW | No | Very low |
 | I001 | 534 | Import block not sorted (isort-style) | LOW | Yes | Very low |
@@ -76,8 +84,9 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 
 - **Q000, W293, W191, I001**: These are fully mechanical style issues. They should be fixed project-wide with `ruff --fix` in a single formatting pass and then enforced in CI. No human review required.
 - **ANN001, ANN201, ANN202**: Type annotations cannot be auto-inserted because ruff does not know the correct types. These require developer effort. Given 9,695 annotation gaps, a pragmatic approach is to enforce annotations only on new code via a `ruff` pre-commit hook (using `--select ANN` with `per-file-ignores` to exclude existing files) while incrementally annotating high-impact modules.
+- **D212, D415, D400, D413** *(new with `--select=ALL`)*: Pydocstyle rules add ~3,000+ findings for docstring formatting. These were not captured in the previous run. Note that D100–D105 and D107 (missing docstrings) are in the `--ignore` list since they are extremely noisy in a codebase that does not yet enforce docstrings universally. The remaining D* rules flag formatting issues in docstrings that *do* exist.
 
-**Recommended action:** Apply `ruff --fix --select Q000,W293,W191,I001` across the codebase in a single batch commit. Treat ANN* as a longer-term typing initiative.
+**Recommended action:** Apply `ruff --fix --select Q000,W293,W191,I001,D212,D413` across the codebase in a single batch commit. Treat ANN* as a longer-term typing initiative. Address D415/D400 (docstring punctuation) as part of a docstring hygiene pass.
 
 ---
 
@@ -100,9 +109,9 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 
 ---
 
-### 5. Code Quality (PLR*, TRY*, SLF*, T*, PLC*, N*, LOG* rules) — Medium Priority
+### 5. Code Quality (PLR*, TRY*, SLF*, T*, PLC*, N*, LOG*, ERA*, C9* rules) — Medium Priority
 
-**Total: ~8,645 findings**
+**Total: ~9,490+ findings**
 
 | Rule | Count | What It Detects | Priority | Auto-fixable | False Positive Estimate |
 |------|-------|-----------------|----------|--------------|-------------------------|
@@ -113,6 +122,8 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 | TRY003 | 633 | Long exception message string passed directly to exception constructor | LOW | No | Low — messages should live in exception classes, not inline strings |
 | LOG015 | 529 | Logging call issues (e.g. `logging.warning` at root logger level) | MEDIUM | No | Low — root logger usage in library code is a real anti-pattern |
 | SLF001 | 521 | Private member access (`_name`) from outside the class | MEDIUM | No | Medium — in tests and friend modules this is intentional; in application code it signals fragile coupling |
+| ERA001 | 444 | Commented-out code detected | LOW | Yes | Medium — some comments are intentional reference code; most are dead code |
+| C901 | 401 | Function is too complex (cyclomatic complexity) | MEDIUM | No | Very low — high complexity is a real maintainability concern |
 
 **Notes:**
 
@@ -121,8 +132,25 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 - **PLC0415**: Non-top-level imports are sometimes necessary (circular imports, optional heavy dependencies). Each instance should be evaluated: if the import is for performance, document it; if it is to work around a circular dependency, consider restructuring.
 - **LOG015**: Using the root logger (`logging.warning(...)` instead of `logger = logging.getLogger(__name__)`) is an anti-pattern in library code. It hijacks the calling application's logging configuration.
 - **SLF001**: Private member access in test files is expected. In production code it indicates a design smell — the accessed member should be made internal API or the accessing code refactored.
+- **ERA001** *(new with `--select=ALL`)*: Commented-out code clutters the codebase and confuses readers. Most instances are safe to remove since version control preserves history. Review before bulk-deleting, as some comments may be intentional examples or TODOs.
+- **C901** *(new with `--select=ALL`)*: 401 functions exceed the default complexity threshold. These are the functions most likely to harbor bugs and most difficult to test. Consider refactoring the highest-complexity functions first.
 
-**Recommended action:** Address T201 (print statements) in library modules as part of a logging hygiene pass. Review PLC0415 and SLF001 findings in non-test code manually.
+**Recommended action:** Address T201 (print statements) in library modules as part of a logging hygiene pass. Review PLC0415 and SLF001 findings in non-test code manually. Remove ERA001 (commented-out code) with `ruff --fix --select ERA001`. Prioritize C901 findings for refactoring in critical paths.
+
+---
+
+### 6. New Rule Categories from `--select=ALL` — Informational
+
+The switch to `--select=ALL` enabled several rule families that were not in the previous explicit selection list. Beyond the D* (pydocstyle) and Q* (quoting) rules already covered above, two additional categories surfaced:
+
+| Category | Description | Findings | Notes |
+|----------|-------------|----------|-------|
+| DOC* | Docstring content rules (parameter documentation, return value documentation) | New | Checks that docstrings accurately describe parameters and return values |
+| SLOT* | `__slots__` rules | New | Flags classes that could benefit from `__slots__` for memory efficiency |
+
+These categories produce a relatively small number of findings compared to the major groups above but represent additional areas of improvement that were previously invisible.
+
+**Configuration note:** The `--ignore` list (`ANN401,E501,COM812,ISC001,D100,D101,D102,D103,D104,D105,D107`) suppresses rules that are either incompatible with the formatter (COM812, ISC001), universally noisy (E501 line length, D100-D107 missing docstrings), or overly restrictive (ANN401 `Any` type usage). This keeps the signal-to-noise ratio manageable while still capturing the maximum breadth of findings.
 
 ---
 
@@ -155,10 +183,10 @@ The projects with the most findings are `rocprofiler-sdk` (7,301), `amdsmi` (6,8
 Run the following in a single batch commit per project or across the whole repo:
 
 ```bash
-ruff check --fix --select Q000,W293,W191,I001,F401,PTH123,PTH118,UP006 .
+ruff check --fix --select Q000,W293,W191,I001,F401,PTH123,PTH118,UP006,D212,D413,ERA001 .
 ```
 
-Expected reduction: approximately 11,000–13,000 findings (Q000, W293, W191, I001, F401, PTH*, UP006).
+Expected reduction: approximately 12,000–15,000 findings (Q000, W293, W191, I001, F401, PTH*, UP006, D212, D413, ERA001).
 
 ### Phase 2 — Security review (manual, high priority)
 
@@ -206,7 +234,8 @@ Configure `ruff.toml` or `pyproject.toml` `[tool.ruff]` sections per project to:
 |-------|----------|----------|--------------|--------|
 | Security (S*) | 6,853 | HIGH | No | Manual review required |
 | Correctness (F*) | ~1,962 | MEDIUM | Partial (F401 yes) | Fix F401 automatically; review F405 |
-| Style (Q*, W*, I*, ANN*) | ~20,693 | LOW | Partial (Q/W/I yes; ANN no) | Batch auto-fix style; plan annotation effort |
+| Style (Q*, W*, I*, ANN*, D*) | ~23,700+ | LOW | Partial (Q/W/I/D212/D413 yes; ANN/D4xx no) | Batch auto-fix style; plan annotation and docstring effort |
 | Modernization (UP*, PTH*) | ~1,814 | LOW | Yes | Batch auto-fix after version check |
-| Code Quality (PLR*, TRY*, SLF*, T*, PLC*, N*, LOG*) | ~8,645 | MEDIUM | No | Targeted manual fixes by module |
-| **Total** | **~51,967** | — | ~13,000–15,000 auto-fixable | Phased remediation |
+| Code Quality (PLR*, TRY*, SLF*, T*, PLC*, N*, LOG*, ERA*, C9*) | ~9,490+ | MEDIUM | Partial (ERA001 yes) | Targeted manual fixes by module |
+| New categories (DOC*, SLOT*) | Minor | LOW | No | Informational; address opportunistically |
+| **Total** | **~56,487** | — | ~14,000–17,000 auto-fixable | Phased remediation |

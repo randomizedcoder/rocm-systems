@@ -132,3 +132,9 @@ Address `build/include_order`, `readability/braces`, `build/namespaces`, etc. vi
 2. Add `-Wthread-safety` Clang annotations to critical runtime classes.
 3. Consider adopting clang-tidy's `modernize-use-*` and `cppcoreguidelines-*` checks as a higher-signal complement to cpplint.
 4. Suppress known false-positive categories project-by-project using `.cpplint` config files to reduce noise in CI.
+
+---
+
+## Configuration Updates
+
+The overall static analysis infrastructure now includes clang-tidy with `-Wswitch-enum` enabled for the same codebase. This complements cpplint's coverage by detecting missing cases in switch statements over enum types, which cpplint does not check. The combination of cpplint (style and runtime safety) and clang-tidy (semantic switch completeness) provides broader coverage for type-safety concerns across the C/C++ code.

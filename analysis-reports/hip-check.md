@@ -414,6 +414,12 @@ The HIP runtime itself. Bugs here propagate to every application that uses HIP.
    `projects/rocshmem`, and `projects/hip` as blocking checks. Allow warnings-only for
    `projects/hip-tests` until the HIP_CHECK macro is uniformly adopted.
 
+7. **Cross-reference:** Hip-check findings should be cross-referenced with the new
+   `semgrep-case-coverage` tool, which detects incomplete switch statements over HIP/ROCm
+   enum types in dispatch code. Missing cases in HIP API dispatch (e.g., unhandled
+   `hipError_t` values, missing `hipMemcpyKind` cases) are a complementary class of bug
+   to the unchecked-return-value findings reported here.
+
 ---
 
 ## Appendix: Rule Reference
