@@ -1,0 +1,130 @@
+rules:
+  # ── HIP API Error Checking ──────────────────────────────────────
+  - id: hip-unchecked-malloc
+    patterns:
+      - pattern: hipMalloc(...)
+      - pattern-not-inside: |
+          $RET = hipMalloc(...);
+          ...
+          if ($RET != hipSuccess) { ... }
+      - pattern-not-inside: |
+          if (hipMalloc(...) != hipSuccess) { ... }
+    message: hipMalloc() return value not checked -- GPU allocation can fail
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: hip-unchecked-memcpy
+    patterns:
+      - pattern: hipMemcpy(...)
+      - pattern-not-inside: |
+          $RET = hipMemcpy(...);
+          ...
+          if ($RET != hipSuccess) { ... }
+    message: hipMemcpy() return value not checked -- transfer can fail
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: hip-unchecked-launch
+    patterns:
+      - pattern: hipLaunchKernelGGL(...)
+      - pattern-not-inside: |
+          hipLaunchKernelGGL(...);
+          ...
+          hipGetLastError();
+    message: Kernel launch not followed by error check -- use hipGetLastError()
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Memory Lifecycle ────────────────────────────────────────────
+  - id: hip-missing-free
+    pattern: |
+      hipMalloc(&$PTR, ...);
+      ...
+      return ...;
+    message: hipMalloc without matching hipFree before return -- potential GPU memory leak
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: hip-double-free
+    pattern: |
+      hipFree($PTR);
+      ...
+      hipFree($PTR);
+    message: Potential double hipFree on same pointer
+    languages: [cpp, c]
+    severity: ERROR
+
+  # ── Synchronization ─────────────────────────────────────────────
+  - id: hip-missing-sync
+    pattern: |
+      hipMemcpyAsync(..., $STREAM);
+      ...
+      $USE;
+    message: Async memcpy without synchronization before use -- add hipStreamSynchronize()
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: hip-device-sync-in-loop
+    pattern: |
+      for (...) {
+        ...
+        hipDeviceSynchronize();
+        ...
+      }
+    message: hipDeviceSynchronize() in loop is expensive -- consider hipStreamSynchronize()
+    languages: [cpp, c]
+    severity: INFO
+
+  # ── Stream Management ───────────────────────────────────────────
+  - id: hip-missing-stream-destroy
+    pattern: |
+      hipStreamCreate(&$STREAM);
+      ...
+      return ...;
+    message: hipStreamCreate without matching hipStreamDestroy before return
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: hip-event-missing-destroy
+    pattern: |
+      hipEventCreate(&$EVENT);
+      ...
+      return ...;
+    message: hipEventCreate without matching hipEventDestroy before return
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── Device Management ───────────────────────────────────────────
+  - id: hip-set-device-unchecked
+    patterns:
+      - pattern: hipSetDevice(...)
+      - pattern-not-inside: |
+          $RET = hipSetDevice(...);
+          ...
+          if ($RET != hipSuccess) { ... }
+    message: hipSetDevice() return value not checked -- device may not exist
+    languages: [cpp, c]
+    severity: WARNING
+
+  # ── CUDA Compatibility ──────────────────────────────────────────
+  - id: cuda-unchecked-malloc
+    patterns:
+      - pattern: cudaMalloc(...)
+      - pattern-not-inside: |
+          $RET = cudaMalloc(...);
+          ...
+          if ($RET != cudaSuccess) { ... }
+    message: cudaMalloc() return value not checked
+    languages: [cpp, c]
+    severity: WARNING
+
+  - id: cuda-unchecked-memcpy
+    patterns:
+      - pattern: cudaMemcpy(...)
+      - pattern-not-inside: |
+          $RET = cudaMemcpy(...);
+          ...
+          if ($RET != cudaSuccess) { ... }
+    message: cudaMemcpy() return value not checked
+    languages: [cpp, c]
+    severity: WARNING

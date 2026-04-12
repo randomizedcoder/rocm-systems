@@ -1,0 +1,42 @@
+# Known static analysis anomalies for the rocm-systems codebase.
+#
+# Each [[anomaly]] entry documents a finding that has been reviewed.
+# Matching uses: tool + check_id + file (exact or glob) + code_anchor
+# (literal substring within +/-anchor_window lines of the reported line).
+#
+# Status values:
+#   false-positive  -- reviewed, not a real issue (suppressed from reports)
+#   needs-review    -- potentially real issue, flagged for maintainer review
+#   confirmed-bug   -- verified real bug, tracked until fixed
+#   wont-fix        -- real issue but accepted risk (suppressed from reports)
+#
+# Per-anomaly analysis docs: .analysis/anomalies/<id>.md
+#
+# After running analysis, add entries here to triage findings.
+# On subsequent runs, suppressed/wont-fix entries are hidden from reports,
+# so any *new* findings immediately stand out.
+
+# ── Examples (uncomment and adapt as findings are triaged) ──────────
+
+# [[anomaly]]
+# id = "example-false-positive"
+# tool = "cppcheck"
+# check_id = "unusedFunction"
+# file = "projects/rocm-core/*"
+# code_anchor = ""
+# status = "false-positive"
+# reason = "Public API functions -- usage is external to this repo"
+# reviewer = "das"
+# date = "2026-04-11"
+
+# [[anomaly]]
+# id = "example-confirmed-bug"
+# tool = "cppcheck"
+# check_id = "uninitMemberVar"
+# file = "experimental/perf-dkms/src/aql_c/pm4_packets.h"
+# code_anchor = "bitfield"
+# status = "confirmed-bug"
+# github_issue = ""
+# reason = "2-bit bitfield test coverage gap"
+# reviewer = "das"
+# date = "2026-04-11"
