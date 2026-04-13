@@ -1,10 +1,23 @@
 # Issue 05: Dangling .c_str() -- Deep Analysis
 
-**Date:** 2026-04-11
+**Date:** 2026-04-11 (initial), re-verified 2026-04-12
 **Branch:** basic-static-analysis
 **Rule:** `dangling-c-str`
 **Semgrep-reported count:** 59 findings
 **Severity after investigation:** LOW-MEDIUM (downgraded from CRITICAL)
+**Status:** 🟡 3 real findings confirmed (profiler `error_string` APIs), 30 false positives, 26 phantom findings
+
+## 2026-04-12 Re-verification
+
+Independent second-pass review of every one of the 59 findings. Conclusions:
+
+- **3 real SUSPECT findings** confirmed at `aqlprofile/.../aql_profile.cpp:195`, `rocprofiler/.../rocprofiler.cpp:481`, `rocprofiler-sdk/.../aql_profile.cpp:235`. All same pattern: `*str = Logger::LastMessage().c_str()` where `LastMessage()` returns `const std::string&` to a thread-local buffer that the next log call will overwrite.
+- **30 SAFE findings**: 22 × `.str().c_str()` on stringstream temporaries passed to immediate consumers (strncpy, fopen, printf, setenv, strdup, stat, ifstream ctor, system); 8 × `.c_str()` on named locals/members.
+- **26 phantom findings (44%)**: file:line pointed at locations with no `.c_str()` call — wrong file extension (.c vs .cpp), line numbers past end-of-file, or completely unrelated code. Worse than the 18% phantom rate seen in the `memcpy-sizeof-pointer` rule. The `expr.h` file alone accounts for 9 phantoms.
+
+No additional real findings beyond the 3 the initial pass identified. The prior analysis's "3 real or borderline issues" estimate is exact.
+
+---
 
 ---
 

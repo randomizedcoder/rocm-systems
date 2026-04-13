@@ -4,6 +4,7 @@
 **Component:** amdsmi (AMD System Management Interface)
 **Branch:** basic-static-analysis
 **Risk Category:** Buffer overflow via unbounded format-string operations
+**Status:** 🟢 Fix submitted 2026-04-12 — [ROCm/rocm-systems#4941](https://github.com/ROCm/rocm-systems/pull/4941). PR also hardens the container-ID extraction in `fdinfo.cc` (previously silent 16-char truncation, unanchored `find()`, no charset validation) against CWE-20/78/117/120/190/400/626/1007 with a 69-test adversarial suite.
 
 ---
 

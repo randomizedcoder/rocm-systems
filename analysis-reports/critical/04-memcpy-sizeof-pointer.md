@@ -1,10 +1,29 @@
 # Issue 04: memcpy sizeof(pointer) -- Deep Analysis
 
-**Date:** 2026-04-11
+**Date:** 2026-04-11 (initial), re-verified 2026-04-12
 **Branch:** basic-static-analysis
 **Rule:** `memcpy-sizeof-pointer`
 **Semgrep-reported count:** 100 findings
 **Severity after investigation:** LOW (downgraded from CRITICAL)
+**Status:** 🔵 Dismissed — 0/100 confirmed bugs after second-pass review
+
+## 2026-04-12 Re-verification
+
+Second independent review of every one of the 100 findings (not sampled) confirms the initial conclusion. Additional finding: **18 of the 100 findings are "phantom"** — they point to file:line locations that contain no `memcpy` call at all:
+
+- 7 findings in `core/util/utils.h` (file has no memcpy anywhere).
+- 3 findings in `core/inc/signal.h` (no memcpy; 2 line numbers exceed file length).
+- 1 finding in `core/inc/exceptions.h` (no memcpy).
+- 1 finding in `core/runtime/isa.cpp:4297` (file is only 444 lines).
+- 1 finding in `rocprofiler-sdk/.../analysis.cpp:660` (file is only 85 lines).
+- 1 finding in `libhsakmt/.../hsakmt_virtio_memory.c:41` (no memcpy at that line).
+- 4 findings with wrong file extensions (.c vs .cc/.cpp) that resolve to valid memcpy calls in the correctly-named file.
+
+This indicates the semgrep rule (or the runner integration) is emitting path/line-number corruption for ~18% of findings. Worth reporting upstream if we keep the rule.
+
+**Final tally:** 82 genuine false positives + 18 phantom findings = 100 total, **0 real bugs.**
+
+---
 
 ---
 

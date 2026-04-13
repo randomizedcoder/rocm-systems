@@ -134,7 +134,7 @@ The case-coverage findings from semgrep-case-coverage complement clang-tidy's `-
 ## Recommended Remediation Phases
 
 ### Phase 1: Security-Critical (This Week)
-- [ ] Fix `sscanf`/`sprintf` buffer overflows in amdsmi (add width limits)
+- [x] Fix `sscanf`/`sprintf` buffer overflows in amdsmi (add width limits) — [ROCm/rocm-systems#4941](https://github.com/ROCm/rocm-systems/pull/4941)
 - [ ] Replace `chmod` with `fchmod` in cuid
 - [ ] Audit `popen()` calls in amdsmi for input sanitization
 - [ ] Fix `memcpy-sizeof-pointer` findings (100 locations)

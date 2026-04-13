@@ -101,6 +101,7 @@ Also affects: `cuid/lib/src/cuid_file.cc:606,609`, `amdsmi/rocm_smi/src/rocm_smi
 
 ## Issue #3: Buffer Overflow via sscanf Without Width Limits in amdsmi — [Full Analysis](analysis-reports/critical/03-sscanf-buffer-overflow.md)
 
+**Status**: 🟢 **Fix submitted**: [ROCm/rocm-systems#4941](https://github.com/ROCm/rocm-systems/pull/4941) — also includes a secondary hardening of the container-ID extraction in `fdinfo.cc` (16-char truncation + unanchored match + no charset validation → anchored match + `[a-zA-Z0-9_-]` whitelist + 64-char cap matching moby/moby `fullLen`).
 **Severity**: HIGH
 **Files**: `projects/amdsmi/rocm_smi/src/rocm_smi.cc:7146,7325` + 20 more locations
 **Tools**: flawfinder (level 4), cpplint | Code review confirmed
@@ -135,14 +136,15 @@ Full list of affected locations (22 total):
 
 ---
 
-## Issue #4: memcpy Copying Pointer Size Instead of Data (100 locations) — [Full Analysis](analysis-reports/critical/04-memcpy-sizeof-pointer.md)
+## ~~Issue #4: memcpy Copying Pointer Size Instead of Data (100 locations)~~ — Dismissed after review — [Full Analysis](analysis-reports/critical/04-memcpy-sizeof-pointer.md)
 
-**Severity**: HIGH
-**Files**: 100 locations across multiple projects
+**Status**: 🔵 **Dismissed** — all 100 findings manually verified, **0 confirmed bugs**. Two independent reviews (2026-04-11 and 2026-04-12).
+**Severity**: ~~HIGH~~ → **LOW** (downgraded)
+**Files**: 100 semgrep findings across multiple projects
 **Tools**: semgrep-cpp (memcpy-sizeof-pointer rule)
-**Exploitability**: N/A — correctness bug, not security
+**Exploitability**: N/A — no real bugs present
 
-### The Bug
+### The Bug (theoretical)
 
 ```cpp
 memcpy(dst, src, sizeof(ptr));  // copies 8 bytes (pointer size on x64)
@@ -150,48 +152,70 @@ memcpy(dst, src, sizeof(ptr));  // copies 8 bytes (pointer size on x64)
 memcpy(dst, src, sizeof(*ptr)); // copies actual data size
 ```
 
-This pattern copies exactly 8 bytes regardless of what `ptr` points to. If the pointed-to type is larger than 8 bytes, data is silently truncated. If smaller, it reads past the intended boundary.
+### Outcome of review
 
-### Impact
-- Silent data corruption in GPU runtime operations
-- In AI/ML workloads, truncated data produces silently wrong model outputs
-- 100 instances means this is a systemic pattern, not a one-off typo
+100 semgrep findings were manually verified against the source. Classification:
 
-### Fix
-Review each instance. Change `sizeof(ptr)` to `sizeof(*ptr)` or `n * sizeof(element_type)`.
+| Category | Count | Status |
+|---|---|---|
+| `sizeof(TypeName)` — named struct/union/scalar type | 33 | SAFE |
+| `sizeof(local_struct_variable)` — struct/union instance | 19 | SAFE |
+| `sizeof(fixed_array)` — local or member array | 12 | SAFE |
+| `sizeof(scalar_variable)` — int, uint64_t, etc. | 10 | SAFE |
+| `sizeof(template_param)` — template T | 5 | SAFE |
+| `sizeof(*pointer)` — correctly dereferenced | 3 | SAFE |
+| Phantom findings (file:line has no memcpy) | 18 | Tool bug |
+| **Confirmed `sizeof(pointer)` bugs** | **0** | — |
+
+### Notes
+
+- The semgrep rule `memcpy-sizeof-pointer` pattern-matches syntactically on `sizeof($IDENT)` inside `memcpy`, with no type resolution, so it fires on every struct/array/scalar/template-param identifier. Estimated true-positive rate on this codebase: **0%**.
+- 18 phantom findings point to lines that contain no `memcpy` at all (file too short, wrong extension, etc.) — a separate bug in the rule/runner worth reporting upstream.
+- **Do NOT add this rule to blocking CI.** Consider replacing with a type-aware equivalent in clang-tidy or cppcheck if the check is valuable.
 
 ---
 
 ## Issue #5: Dangling .c_str() — Use-After-Free (59 locations) — [Full Analysis](analysis-reports/critical/05-dangling-cstr.md)
 
-**Severity**: HIGH
-**Files**: 59 locations across multiple projects
+**Status**: 🟡 **3 real findings confirmed** — same public-API anti-pattern in three profiler `error_string` functions. Fix PR TBD. 30 false positives + 26 phantom findings dismissed after two independent reviews (2026-04-11, 2026-04-12).
+**Severity**: ~~HIGH~~ → **MEDIUM** (real issues are public API contract violations, not immediate crashes)
+**Files**: 59 semgrep findings → 3 real, across 3 files
 **Tools**: semgrep-cpp (dangling-c-str rule)
-**Exploitability**: N/A — correctness bug, intermittent crashes
+**Exploitability**: LOW — latent UAF in error-string APIs; would need a caller to retain the pointer across another log call on the same thread
 
-### The Bug
+### The real bug (3 instances, identical pattern)
 
 ```cpp
-const char* name = some_function().c_str();  // temporary string destroyed
-use(name);  // dangling pointer — undefined behavior
+PUBLIC_API hsa_status_t *_error_string(const char** str) {
+  *str = Logger::LastMessage().c_str();   // pointer escapes into caller
+  return HSA_STATUS_SUCCESS;
+}
 ```
 
-When `.c_str()` is called on a temporary `std::string`, the string is destroyed at the end of the full expression. The pointer becomes dangling. Depending on memory reuse patterns, this may:
-- Work by coincidence (memory not yet reused)
-- Return garbage data
-- Crash with SIGSEGV
-- Be exploitable for information disclosure
+`LastMessage()` returns `const std::string&` to a thread-local map entry (`logger.message_[GetTid()]`). The returned `const char*` is written to the caller's `*str` and has no documented lifetime — it becomes invalid as soon as that thread logs again.
 
-### Impact
-- Intermittent crashes that are hard to reproduce
-- Silent data corruption if the memory is reused
-- Potential security issue if the string contained sensitive data
+Locations:
+- `projects/aqlprofile/src/core/aql_profile.cpp:195`
+- `projects/rocprofiler/src/core/rocprofiler.cpp:481`
+- `projects/rocprofiler-sdk/source/lib/aqlprofile/core/aql_profile.cpp:235`
 
-### Fix
-```cpp
-std::string name = some_function();  // keep the string alive
-use(name.c_str());
-```
+Likely fix: return `strdup()` with a "caller must free" contract, or copy into a caller-provided buffer, or return by value from `LastMessage()`.
+
+### Outcome of review
+
+| Category | Count |
+|---|---|
+| SAFE — `.str().c_str()` passed to immediate consumer (strncpy/fopen/printf/setenv/strdup/stat/ifstream/system) | 22 |
+| SAFE — named local `.c_str()` consumed in same expression | 3 |
+| SAFE — `.c_str()` in string assignment context (copies) | 1 |
+| SAFE — `.c_str()` on named member / `what()` / local param | 4 |
+| Phantom findings (file:line has no `.c_str()`) | 26 |
+| **Real SUSPECT findings** | **3** |
+
+### Notes
+
+- Phantom rate is **44% (26/59)** — semgrep is reporting wrong file extensions (`.c` vs `.cpp`), lines beyond file length, or lines with no `.c_str()` at all. Worse than the memcpy rule's 18%. Worth reporting upstream.
+- The 3 real findings are in public APIs published via `hsa_ven_amd_aqlprofile_error_string` / `rocprofiler_error_string`; their contracts ought to be documented and fixed — but this is a separate PR, not blocking top-10 review.
 
 ---
 
