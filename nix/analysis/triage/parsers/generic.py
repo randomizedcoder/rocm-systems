@@ -16,8 +16,10 @@ from finding import Finding, normalize_path, normalize_severity
 
 
 # Pattern: file:line:col: severity: message [check-id]
+# Also handles cpplint's double-bracket `[category] [priority]` tail by
+# allowing an optional trailing `[digits]` priority after the check-id.
 _FULL_RE = re.compile(
-    r'^(.+?):(\d+)(?::\d+)?:\s*(?:(error|warning|note|info|style|convention|refactor))?\s*:?\s*(.+?)(?:\s+\[([^\]]+)\])?$'
+    r'^(.+?):(\d+)(?::\d+)?:\s*(?:(error|warning|note|info|style|convention|refactor))?\s*:?\s*(.+?)(?:\s+\[([^\]]+)\])?(?:\s+\[\d+\])?$'
 )
 
 # Pattern: file:line: message (check-id)

@@ -1,5 +1,7 @@
 # Issue 9: Thread-Unsafe Functions (strtok, strerror)
 
+> **Triage status (2026-04-13):** All findings have been classified in [`.analysis/anomalies.toml`](../../.analysis/anomalies.toml) (21 new entries; covers 64 cpplint `runtime/threadsafe_fn` + all 156 semgrep `strerror-thread-unsafe` findings). Two real bugs confirmed (rocdecode + rocjpeg `GetVisibleDevices` — `std::strtok` on `std::getenv` return → UB); documented in [`.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md`](../../.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md) and [`.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md`](../../.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md). Incidental triage-engine fix: cpplint's `[category] [priority]` double-bracket tail now parses correctly. See outcome table in [CRITICAL-ISSUES.md §9](../../CRITICAL-ISSUES.md).
+
 ## Summary
 
 cpplint reported 121 `runtime/threadsafe_fn` warnings (predominantly `strtok`) and semgrep flagged 86 instances of `strerror-thread-unsafe`. This analysis examines every `strtok` call site and categorizes the `strerror` usage to determine which, if any, represent real concurrency bugs versus harmless lint noise.

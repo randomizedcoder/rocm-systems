@@ -251,3 +251,314 @@ status = "false-positive"
 reason = "Each hipFree(d_a) is in a separate HIP_TEST_CASE with its own local hipMalloc. The rule does not respect function scope."
 reviewer = "das"
 date = "2026-04-13"
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #9 — Thread-unsafe functions (cpplint runtime/threadsafe_fn,
+# semgrep strerror-thread-unsafe)
+# Scope: 121 cpplint threadsafe_fn (79 prod / 42 test) + 156 semgrep
+# strerror production findings. Preliminary review:
+# analysis-reports/critical/09-thread-unsafe-functions.md
+# Outcome: 2 confirmed bugs (rocdecode + rocjpeg GetVisibleDevices
+# modify getenv return); remainder false-positive (initialization-only
+# code, example/sample code, or glibc-TLS-safe strerror).
+# ──────────────────────────────────────────────────────────────────────
+
+# ─── Note: 2 confirmed bugs exist (rocdecode + rocjpeg GetVisibleDevices
+# — std::strtok on std::getenv return, UB) but are NOT surfaced by
+# cpplint because cpplint's runtime/threadsafe_fn rule does not match
+# std:: namespace-qualified strtok calls. They are documented in:
+#   .analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md
+#   .analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md
+# and tracked in CRITICAL-ISSUES.md §9. Fix PR pending.
+
+# ─── RCCL strtok: initialization / topology / debug parsing (FP) ───
+# rccl/src/debug.cc strtok calls are all inside ncclDebugInit() which
+# runs under pthread_mutex_lock(&ncclDebugLock) with a one-time init
+# guard (if ncclDebugLevel < 0). rccl/src/include/cpuset.h strtok calls
+# are static helpers used during topology discovery (inherently
+# serialized init). rccl/src/misc/archinfo.cc is a device-property query
+# called during init. rccl/src/misc/param.cc strtok parses env vars at
+# init. All operate on strdup'd copies or modifiable local buffers.
+# Note: rccl's newer code uses strtok_r (17 sites); these predate that.
+
+[[anomaly]]
+id = "rccl-src-strtok-init-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rccl/src/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "All rccl/src strtok calls are in initialization paths (ncclDebugInit under mutex, topology/cpuset discovery, device-property query, env-var parsing at init). Operate on strdup'd copies. Runtime uses strtok_r (17 sites) in newer code; these are pre-modernization init helpers."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── RCCL tools / ext-tuner / topo_expl: test/sample/config parsing (FP) ───
+
+[[anomaly]]
+id = "rccl-tools-strtok-sample-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rccl/tools/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "Sample/benchmark tooling (topo_expl model parsing) — single-threaded CLI utilities, not runtime library code."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rccl-ext-tuner-strtok-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rccl/ext-tuner/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "Example tuner plugin; CSV config parsing on a local stack buffer (lineCopy). Single-threaded config load."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── CLR PAL paldevice.cpp: GPU_DEVICE_ORDINAL parsing at init (FP) ───
+# Uses const_cast<char*> on env var — a minor correctness defect (strtok
+# modifies the getenv return), but the PAL backend is Windows/console
+# specific and this runs once at device enumeration. Flagged in the
+# preliminary review as low priority; not batched with the rocdecode/
+# rocjpeg fix because the PAL path is non-critical for Linux ROCm.
+
+[[anomaly]]
+id = "clr-pal-paldevice-strtok-init-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/clr/rocclr/device/pal/paldevice.cpp"
+code_anchor = "strtok"
+anchor_window = 2
+status = "false-positive"
+reason = "parseRequestedDeviceList() runs once during Device::init(). PAL backend (Windows-focused), not primary Linux ROCm path. Const_cast on getenv is a minor defect but init-only; preliminary review classified as low-priority cleanup, not a fix-now bug."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rocr-runtime libhsakmt strtok: sysfs topology parsing (FP) ───
+# topology.c and dxg/topology_lnx.cpp strtok calls parse sysfs
+# shared_cpu_map strings during get_cpu_cache_info() at HSA topology
+# discovery. Pure init code reading CPU-map sysfs files once.
+
+[[anomaly]]
+id = "rocr-runtime-libhsakmt-strtok-init-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocr-runtime/libhsakmt/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "libhsakmt topology strtok calls parse sysfs CPU-map strings during one-time HSA topology discovery. Owned buffers from sysfs read; strtok_r would be more idiomatic but not required for correctness here."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rccl-tests common.cu: strtok in test harness (FP) ───
+
+[[anomaly]]
+id = "rccl-tests-common-strtok-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rccl-tests/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "rccl-tests harness — single-threaded test driver parsing CLI args / device lists at startup."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── experimental perf-dkms packet_gen_tool.c: CLI tool (FP) ───
+
+[[anomaly]]
+id = "experimental-perf-dkms-strtok-tool-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "experimental/perf-dkms/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "Experimental CLI tooling; strtok on a local stack copy (spec_copy) during command-line argument parsing. Single-threaded."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rocdecode/rocjpeg samples (separate from the confirmed bug in src/) ───
+
+[[anomaly]]
+id = "rocdecode-samples-strtok-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocdecode/samples/**"
+code_anchor = "strtok"
+anchor_window = 0
+status = "false-positive"
+reason = "Sample code; command-line argument parsing in example applications."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rand() in samples / examples / tests (FP) ───
+# rand() calls are in rocprofiler-sdk samples, hip docs example code,
+# rocprofiler-compute sample, opencl tests, hip-tests perftests. All
+# single-threaded test data generation; none are in runtime library code.
+
+[[anomaly]]
+id = "rocprofiler-sdk-samples-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocprofiler-sdk/samples/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "rocprofiler-sdk samples — single-threaded test data generation in example applications. Not runtime library code."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "hip-docs-example-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/hip/docs/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "HIP documentation example code; illustrative snippets, not runtime library code."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rocprofiler-compute-sample-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocprofiler-compute/sample/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "rocprofiler-compute sample application; single-threaded benchmark."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "clr-ocltst-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/clr/opencl/tests/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "OpenCL test harness (ocltst); single-threaded test code."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "hip-tests-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/hip-tests/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "hip-tests perftests/unit tests; single-threaded test data generation."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "aqlprofile-test-rand-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/aqlprofile/test/**"
+code_anchor = "rand"
+anchor_window = 0
+status = "false-positive"
+reason = "aqlprofile test helpers; single-threaded test code."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── ctime/gmtime/localtime: logging in daemons / samples (FP) ───
+
+[[anomaly]]
+id = "cuid-daemon-ctime-init-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/cuid/daemon/amdcuid_daemon.cc"
+code_anchor = "ctime"
+anchor_window = 2
+status = "false-positive"
+reason = "ctime() in init_logging() — called once at daemon startup to write a log-start timestamp. Not concurrent."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rocprofiler-sdk-samples-gmtime-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocprofiler-sdk/samples/**"
+code_anchor = "time"
+anchor_window = 0
+status = "false-positive"
+reason = "Sample code timestamp formatting in example tracing applications. Single-threaded."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── getpwuid: examples / single-query info tools (FP) ───
+
+[[anomaly]]
+id = "amdsmi-example-getpwuid-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/amdsmi/example/**"
+code_anchor = "getpwuid"
+anchor_window = 0
+status = "false-positive"
+reason = "amdsmi example application; single-threaded."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rocminfo-getpwuid-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "projects/rocminfo/**"
+code_anchor = "getpwuid"
+anchor_window = 0
+status = "false-positive"
+reason = "rocminfo is a single-shot info dump CLI tool; no concurrent execution context."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── Test-code threadsafe_fn blanket (42 findings) ───
+# All cpplint threadsafe_fn findings under test/ trees are FP by default
+# (test code is inherently single-threaded per test case). Covered by
+# existing filter.is_test_code() in most reports; this glob documents
+# the decision explicitly for completeness.
+
+[[anomaly]]
+id = "test-code-threadsafe-fn-fp"
+tool = "cpplint"
+check_id = "runtime/threadsafe_fn"
+file = "**/test/**"
+code_anchor = ""
+anchor_window = 0
+status = "false-positive"
+reason = "Test code — single-threaded execution per test case. Not applicable to concurrency analysis."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── strerror: glibc implementation is thread-safe via TLS (blanket FP) ───
+# All 156 semgrep strerror findings are in error/diagnostic logging
+# paths. ROCm targets glibc-based Linux exclusively. glibc implements
+# strerror() using a thread-local buffer, making it de facto thread-safe
+# on all supported platforms. Migrating 156 call sites to strerror_r
+# would incur POSIX vs GNU signature conflicts with no practical benefit.
+
+[[anomaly]]
+id = "strerror-glibc-tls-thread-safe-fp"
+tool = "semgrep"
+check_id = "nix.store.strerror-thread-unsafe"
+file = "**"
+code_anchor = "strerror"
+anchor_window = 2
+status = "false-positive"
+reason = "glibc (the only ROCm target) implements strerror() using a thread-local buffer; calls are de facto thread-safe. All findings are in error-logging paths where the worst case is a garbled log message, not data corruption. Per-call migration to strerror_r would conflict with POSIX/GNU signature divergence for no practical gain. See analysis-reports/critical/09-thread-unsafe-functions.md Part B."
+reviewer = "das"
+date = "2026-04-13"

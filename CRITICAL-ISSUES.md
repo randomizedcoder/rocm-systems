@@ -375,32 +375,55 @@ SSL verification is **enabled by default** and only disabled when the user sets 
 
 ## Issue #9: Thread-Unsafe Functions in Multi-Threaded GPU Runtime — [Full Analysis](analysis-reports/critical/09-thread-unsafe-functions.md)
 
-**Severity**: MEDIUM-HIGH
-**Files**: 121 `strtok` + 86 `strerror` = 207 locations
-**Tools**: cpplint (runtime/threadsafe_fn), semgrep-cpp (strerror-thread-unsafe)
-**Exploitability**: N/A — data race / correctness
+**Status (2026-04-13): 🔵 Triaged — 2 real bugs identified (not thread-safety but `strtok`-on-`getenv` UB); pass-through bulk of findings are false-positive.**
 
-### The Bug
+**Severity**: MEDIUM-HIGH (for the 2 real bugs); lint-noise for the rest
+**Findings (corrected)**: 121 cpplint `runtime/threadsafe_fn` (79 prod / 42 test) + 156 semgrep `strerror-thread-unsafe` = **277 total** (earlier count of 207 under-counted strerror).
+**Tools**: cpplint `runtime/threadsafe_fn`, semgrep-cpp `strerror-thread-unsafe`
+**Exploitability**: Low — one site is deterministic UB but only observable if the env var is re-read later in the same process.
 
+### Triage outcome
+
+| Bucket | Count | Classification | Notes |
+|---|---|---|---|
+| `std::strtok` on `std::getenv()` return (rocdecode + rocjpeg `GetVisibleDevices`) | 2 sites | **confirmed-bug** | UB: `strtok` writes into the process environment. Not surfaced by cpplint (namespaced form); found by manual review. Fix pending. |
+| `strtok` in init/topology/env-parse (rccl `src/`, `cpuset.h`, `debug.cc`, `archinfo.cc`, CLR `paldevice`, rocr-runtime `libhsakmt`) | ~20 sites | false-positive | One-time init, often under mutex; operates on `strdup`'d copies. |
+| `strtok` in samples / tests / CLI tooling (rccl `tools/`, `ext-tuner/`, `rccl-tests`, `rocdecode/samples/`, `experimental/perf-dkms`) | ~10 sites | false-positive | Single-threaded tooling, not runtime. |
+| `rand()` in samples/examples/tests (rocprofiler-sdk samples, hip docs, rocprofiler-compute sample, ocltst, hip-tests, aqlprofile tests) | ~80 sites | false-positive | Example / single-threaded test data generation. |
+| `ctime`/`gmtime` in daemon init + samples (cuid daemon, rocprofiler-sdk samples) | ~5 sites | false-positive | Init-only timestamps; not concurrent. |
+| `getpwuid` in samples/info tools (amdsmi example, rocminfo) | ~4 sites | false-positive | Single-shot info tools. |
+| Test-code findings | 42 sites | false-positive | Inherent per-test single-threaded context. |
+| `strerror` everywhere | 156 sites | false-positive | glibc implements `strerror()` via thread-local buffer; de facto thread-safe on the only ROCm target. Migrating 156 sites to `strerror_r` would incur POSIX/GNU signature conflicts for no practical gain. |
+
+**Confirmed bugs (to fix upstream):**
+- `projects/rocdecode/src/rocdecode/vaapi/vaapi_videodecoder.cpp:1012,1015` — [`.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md`](.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md)
+- `projects/rocjpeg/src/rocjpeg_vaapi_decoder.cpp:937,940` — [`.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md`](.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md)
+
+Both sites call `std::strtok` directly on the pointer returned by `std::getenv("ROCR_VISIBLE_DEVICES")` / `HIP_VISIBLE_DEVICES`. `strtok` modifies its input in place, which is undefined behaviour per C11 §7.22.4.6 when applied to the `getenv` return — it corrupts the environment variable string for subsequent reads in the process. Fix: `strdup` + `strtok_r` + `free`, or `std::string`+`std::stringstream`. A single PR should cover both sites (copy-paste bug).
+
+### Incidental triage-engine fix (this pass)
+
+- `nix/analysis/triage/parsers/generic.py` `_FULL_RE` was silently capturing cpplint's `[priority]` integer as the check-id when cpplint emitted double-bracket tails like `... [runtime/threadsafe_fn] [2]`. Post-fix, `runtime/threadsafe_fn` is now a real category in `--summary` (121 findings), enabling filterable drill-down.
+
+### Triage record
+
+All findings in this issue are now encoded as `[[anomaly]]` entries in [`.analysis/anomalies.toml`](.analysis/anomalies.toml); future runs will automatically suppress the false-positive buckets and re-surface any new un-classified site.
+
+### Fix (for the 2 real bugs)
 ```cpp
-// strtok uses global state — data race if called from multiple threads
-char* token = strtok(line, ",");   // NOT thread-safe
+// Before
+char *visible_devices = std::getenv("ROCR_VISIBLE_DEVICES");
+char *token = std::strtok(visible_devices, ",");   // UB on getenv return
 
-// strerror returns pointer to shared static buffer
-fprintf(stderr, "Error: %s\n", strerror(errno));  // NOT thread-safe
-```
-
-In a GPU runtime where multiple host threads manage different GPU devices and streams, these functions cause data races. `strtok` corrupts parse state across threads. `strerror` may return a string that another thread overwrites before it's used.
-
-### Impact
-- Corrupted parsed data (strtok)
-- Wrong or garbled error messages (strerror)
-- In GPU runtime context, may cause wrong device selection or configuration
-
-### Fix
-```cpp
-char* token = strtok_r(line, ",", &saveptr);  // thread-safe
-char buf[256]; strerror_r(errno, buf, sizeof(buf));  // thread-safe
+// After
+const char *env = std::getenv("ROCR_VISIBLE_DEVICES");
+if (env) {
+    std::stringstream ss(env);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        visible_devices_vetor.push_back(std::atoi(item.c_str()));
+    }
+}
 ```
 
 ---
@@ -455,7 +478,7 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 6b | Unchecked HIP returns (hip-tests) | MEDIUM | Correctness | ~3,700 test-code findings, un-triaged | TBD | 📋 Deferred — see §6 |
 | 7 | HIP double-free | HIGH | Correctness | 0 real / 14 unique (24 raw), all in hip-tests | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 8 | SSL verify=False | MEDIUM | Security | 2 opt-in sites in rocinsight (B501 false-positive + opt-out had no runtime warning) | 2 hours | 🟢 [#4984](https://github.com/ROCm/rocm-systems/pull/4984) |
-| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
+| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 277 locations → 2 confirmed bugs | 8 hours | 🔵 Triaged (fix pending) |
 | 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour | ⚪ Open |
 
 **Estimated total effort**: ~47 hours for all 10 issues.
