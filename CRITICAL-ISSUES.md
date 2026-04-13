@@ -263,6 +263,24 @@ The original "~300 non-test locations in clr (150), rccl (128), rocshmem (74)" r
 
 **Total: 65 production findings, 0 real bugs.** Out-of-scope sibling findings (in `hip-tests/`, `rocprofiler-systems/` examples, etc.) remain un-triaged and may still contain real issues — those are deferred to a separate pass.
 
+### ⏭️ Deferred follow-up: Issue #6b — hip-tests (~3,700 findings)
+
+**Status**: 📋 To do — the larger and tedious half of this class of findings.
+
+`projects/hip-tests/` contributes on the order of 3,700 findings across the same three check-IDs. They were deliberately left out of the primary pass because:
+
+- They're test code, not production library code — the consequence of an unchecked HIP call in a test is usually "test aborts loudly" rather than "user data silently corrupted", so the real-bug yield is expected to be lower than the 1.1% baseline (ballpark 5–30 real issues, mostly "test silently passes when it should fail").
+- Test suites tend to reuse a small number of error-checking macros (`HIP_CHECK`, `HIPCHECK`, `HIPRT_CHECK`, Catch2 section expansions, etc.). Most findings should collapse into a handful of pattern-glob anomalies — tedious to enumerate, cheap per glob.
+
+**Approach when we return:**
+
+1. Extract the 3,700 to a worklist and bucket by `(file, check_id)` and `(subdir, check_id)` — no decisions, just inventory.
+2. Write globs for the dominant buckets (expect the top ~10 buckets to cover the majority).
+3. Review the long tail individually — that's where any real bugs will be.
+4. **Highest-ROI follow-up**: teach `nix/analysis/rules/semgrep-hip.yaml` to recognise the wrapping macros (`CUDACHECK`, `HIP_CALL`, `HIPCHECK`, `CHECK_HIP`, and the hip-tests equivalents). Permanently drops the next run's noise floor on this rule class from thousands to low hundreds.
+
+Tracking this as **#6b** rather than a new top-ten slot because the rule + scope are the same as #6; only the subtree is different.
+
 ### What this tells us
 
 - The rule is noisy on rccl/rocshmem because both projects have mature, consistent error-checking macros the rule doesn't recognise. An obvious rule improvement: teach semgrep-hip to treat `CUDACHECK(...)`, `HIP_CALL(...)`, `CHECK_HIP(...)` as checked calls. Tracked as a follow-up to this pass.
@@ -410,7 +428,8 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 3 | sscanf buffer overflow | HIGH | Security | amdsmi (22 locations) | 4 hours | ⚪ Open |
 | 4 | memcpy sizeof(ptr) | HIGH | Correctness | 100 locations | 8 hours | ⚪ Open |
 | 5 | Dangling .c_str() | HIGH | Correctness | 3 real / 59 raw | 4 hours | 🟢 [#4951](https://github.com/ROCm/rocm-systems/pull/4951) |
-| 6 | Unchecked HIP returns | HIGH | Correctness | 0 real / 65 in-scope (all macro-wrapped) | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
+| 6 | Unchecked HIP returns (core runtime) | HIGH | Correctness | 0 real / 65 in-scope (all macro-wrapped) | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
+| 6b | Unchecked HIP returns (hip-tests) | MEDIUM | Correctness | ~3,700 test-code findings, un-triaged | TBD | 📋 Deferred — see §6 |
 | 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours | ⚪ Open |
 | 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
 | 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
