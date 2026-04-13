@@ -22,6 +22,7 @@ Each issue was scored on four dimensions:
 
 ## Issue #1: CI Script Command Injection via PR Branch Names — [Full Analysis](analysis-reports/critical/01-ci-command-injection.md)
 
+**Status**: 🟢 **Fix submitted**: [ROCm/rocm-systems#4939](https://github.com/ROCm/rocm-systems/pull/4939)
 **Severity**: CRITICAL
 **File**: `.github/scripts/import_subrepo_prs.py:68`
 **Tools**: bandit B602, B605 | Code review confirmed
@@ -64,6 +65,7 @@ Also affects: `pr_category_label.py:91,96,97`, `pr_detect_changed_subtrees.py:11
 
 ## Issue #2: HMAC Key File Permission Race (TOCTOU) in cuid Daemon — [Full Analysis](analysis-reports/critical/02-cuid-chmod-toctou.md)
 
+**Status**: 🟢 **Fix submitted**: [ROCm/rocm-systems#4940](https://github.com/ROCm/rocm-systems/pull/4940)
 **Severity**: CRITICAL
 **File**: `projects/cuid/lib/src/hmac.cc:163`
 **Tools**: flawfinder (level 5) | Code review confirmed
@@ -362,18 +364,18 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 
 ## Summary Table
 
-| # | Issue | Severity | Type | Location | Effort |
-|---|-------|----------|------|----------|--------|
-| 1 | CI command injection | CRITICAL | Security | .github/scripts/ | 1 hour |
-| 2 | HMAC key chmod TOCTOU | CRITICAL | Security | cuid daemon | 2 hours |
-| 3 | sscanf buffer overflow | HIGH | Security | amdsmi (22 locations) | 4 hours |
-| 4 | memcpy sizeof(ptr) | HIGH | Correctness | 100 locations | 8 hours |
-| 5 | Dangling .c_str() | HIGH | Correctness | 59 locations | 4 hours |
-| 6 | Unchecked HIP returns | HIGH | Correctness | 300 runtime locations | 16 hours |
-| 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours |
-| 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour |
-| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours |
-| 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour |
+| # | Issue | Severity | Type | Location | Effort | Status |
+|---|-------|----------|------|----------|--------|--------|
+| 1 | CI command injection | CRITICAL | Security | .github/scripts/ | 1 hour | 🟢 [PR #4939](https://github.com/ROCm/rocm-systems/pull/4939) |
+| 2 | HMAC key chmod TOCTOU | CRITICAL | Security | cuid daemon | 2 hours | 🟢 [PR #4940](https://github.com/ROCm/rocm-systems/pull/4940) |
+| 3 | sscanf buffer overflow | HIGH | Security | amdsmi (22 locations) | 4 hours | ⚪ Open |
+| 4 | memcpy sizeof(ptr) | HIGH | Correctness | 100 locations | 8 hours | ⚪ Open |
+| 5 | Dangling .c_str() | HIGH | Correctness | 59 locations | 4 hours | ⚪ Open |
+| 6 | Unchecked HIP returns | HIGH | Correctness | 300 runtime locations | 16 hours | ⚪ Open |
+| 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours | ⚪ Open |
+| 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
+| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
+| 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour | ⚪ Open |
 
 **Estimated total effort**: ~47 hours for all 10 issues.
 **Issues 1, 2, 8**: Can be fixed in a single afternoon — highest ROI.
