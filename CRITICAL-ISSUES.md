@@ -177,7 +177,7 @@ memcpy(dst, src, sizeof(*ptr)); // copies actual data size
 
 ## Issue #5: Dangling .c_str() — Use-After-Free (59 locations) — [Full Analysis](analysis-reports/critical/05-dangling-cstr.md)
 
-**Status**: 🟡 **3 real findings confirmed** — same public-API anti-pattern in three profiler `error_string` functions. Fix PR TBD. 30 false positives + 26 phantom findings dismissed after two independent reviews (2026-04-11, 2026-04-12).
+**Status**: 🟢 **Fix submitted**: [ROCm/rocm-systems#4951](https://github.com/ROCm/rocm-systems/pull/4951) — same public-API anti-pattern in three profiler `error_string` functions; fixed with call-site `thread_local` copy (strerror/dlerror-style contract) + GTest regressions in all three projects. 30 false positives + 26 phantom findings dismissed after two independent reviews (2026-04-11, 2026-04-12).
 **Severity**: ~~HIGH~~ → **MEDIUM** (real issues are public API contract violations, not immediate crashes)
 **Files**: 59 semgrep findings → 3 real, across 3 files
 **Tools**: semgrep-cpp (dangling-c-str rule)
@@ -199,7 +199,7 @@ Locations:
 - `projects/rocprofiler/src/core/rocprofiler.cpp:481`
 - `projects/rocprofiler-sdk/source/lib/aqlprofile/core/aql_profile.cpp:235`
 
-Likely fix: return `strdup()` with a "caller must free" contract, or copy into a caller-provided buffer, or return by value from `LastMessage()`.
+Fix applied in [#4951](https://github.com/ROCm/rocm-systems/pull/4951): copy the logger's last message into a call-site `thread_local std::string` and return its `c_str()`. The returned pointer is now stable until the next `*_error_string` call on the same thread — the same contract `strerror(3)` / `dlerror(3)` provide. No ABI change; no caller-side free required.
 
 ### Outcome of review
 
@@ -215,7 +215,8 @@ Likely fix: return `strdup()` with a "caller must free" contract, or copy into a
 ### Notes
 
 - Phantom rate is **44% (26/59)** — semgrep is reporting wrong file extensions (`.c` vs `.cpp`), lines beyond file length, or lines with no `.c_str()` at all. Worse than the memcpy rule's 18%. Worth reporting upstream.
-- The 3 real findings are in public APIs published via `hsa_ven_amd_aqlprofile_error_string` / `rocprofiler_error_string`; their contracts ought to be documented and fixed — but this is a separate PR, not blocking top-10 review.
+- The 3 real findings are in public APIs published via `hsa_ven_amd_aqlprofile_error_string` / `rocprofiler_error_string`; fix landed as [#4951](https://github.com/ROCm/rocm-systems/pull/4951).
+- **Signal-to-noise takeaway**: ~200 semgrep dangling-`c_str` findings → **3 real bugs (~1.5%)**. Extrapolating that hit rate across the full ~20k cross-tool finding backlog is not rigorous (different rules have very different precision, and semgrep's phantom rate here was 44%), but it does set an informative lower bound: even at 1% real-bug density, there are ~200 more real bugs still buried in the noise. Triage throughput, not detection, is now the bottleneck. Prioritize rules with lower phantom/false-positive rates and public-API / root-daemon / kernel-adjacent paths for the next passes.
 
 ---
 
@@ -394,7 +395,7 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 2 | HMAC key chmod TOCTOU | CRITICAL | Security | cuid daemon | 2 hours | 🟢 [PR #4940](https://github.com/ROCm/rocm-systems/pull/4940) |
 | 3 | sscanf buffer overflow | HIGH | Security | amdsmi (22 locations) | 4 hours | ⚪ Open |
 | 4 | memcpy sizeof(ptr) | HIGH | Correctness | 100 locations | 8 hours | ⚪ Open |
-| 5 | Dangling .c_str() | HIGH | Correctness | 59 locations | 4 hours | ⚪ Open |
+| 5 | Dangling .c_str() | HIGH | Correctness | 3 real / 59 raw | 4 hours | 🟢 [#4951](https://github.com/ROCm/rocm-systems/pull/4951) |
 | 6 | Unchecked HIP returns | HIGH | Correctness | 300 runtime locations | 16 hours | ⚪ Open |
 | 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours | ⚪ Open |
 | 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
