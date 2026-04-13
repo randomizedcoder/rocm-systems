@@ -94,12 +94,38 @@ def _try_parse_line(line: str, tool_name: str) -> Finding | None:
 
 
 def parse_bandit_json(path: str) -> list[Finding]:
-    """Parse bandit JSON report."""
+    """Parse bandit JSON report.
+
+    Bandit prefixes its JSON output with ``[main] INFO ...`` log lines
+    (and sometimes ``[warnings] WARNING ...`` lines). ``json.load`` chokes
+    on the preamble, so skip ahead to the first line that starts with
+    ``[`` — the root of the findings array.
+    """
     findings = []
     try:
         with open(path) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+            content = f.read()
+    except FileNotFoundError:
+        return findings
+
+    # Skip bandit's stderr-style log preamble (e.g. ``[main] INFO ...``,
+    # ``[warnings] WARNING ...``) to the start of the JSON document.
+    # Bandit emits a JSON *object* (not an array) — the root is ``{``.
+    lines = content.splitlines(keepends=True)
+    start = -1
+    offset = 0
+    for line in lines:
+        if line.lstrip().startswith('{'):
+            start = offset
+            break
+        offset += len(line)
+
+    if start < 0:
+        return findings
+
+    try:
+        data = json.loads(content[start:])
+    except json.JSONDecodeError:
         return findings
 
     for result in data.get('results', []):
