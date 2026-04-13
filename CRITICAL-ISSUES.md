@@ -332,33 +332,44 @@ All recorded as pattern-glob anomalies in [`.analysis/anomalies.toml`](.analysis
 
 ## Issue #8: SSL Certificate Verification Disabled in LLM Client — [Full Analysis](analysis-reports/critical/08-ssl-verify-disabled.md)
 
-**Severity**: HIGH
-**File**: `experimental/python/rocinsight/rocinsight/ai_analysis/interactive.py:4324`
-**Tools**: bandit B501 | Code review confirmed
-**Exploitability**: HIGH — network-level MITM
+**Status**: 🟢 **Hardening submitted**: [ROCm/rocm-systems#4984](https://github.com/ROCm/rocm-systems/pull/4984)
+**Severity**: MEDIUM (after review) — was HIGH as classified by the rule
+**Files**: 2 occurrences (the preliminary report cited a stale single line in `interactive.py`; the actual sites are):
+- `experimental/python/rocinsight/rocinsight/ai_analysis/llm_conversation.py:91`
+- `experimental/python/rocinsight/rocinsight/ai_analysis/llm_analyzer.py:1088`
+**Tools**: bandit B501 (request_with_no_cert_validation)
+**Exploitability**: LOW — opt-in behind `ROCINSIGHT_LLM_PRIVATE_VERIFY_SSL=0` env var, documented in README
 
-### The Bug
+### What the rule catches
 
 ```python
-client = httpx.Client(verify=False)  # SSL verification disabled
-response = client.post(llm_endpoint, json={"prompt": source_code_context})
+http_client = _httpx.Client(verify=False)
 ```
 
-This sends GPU profiling data and source code snippets to an LLM API over an unverified HTTPS connection.
+Bandit flags the literal `verify=False`. If this were unconditional, it would be a critical vulnerability — MITM attackers could intercept/modify LLM traffic carrying profiling data and source-code snippets.
 
-### Impact
-- MITM attacker can intercept source code and profiling data
-- Attacker can inject modified LLM responses (AI supply chain attack)
-- The `ROCINSIGHT_LLM_PRIVATE_VERIFY_SSL=0` flag provides no runtime warning
+### What the code actually does
 
-### Fix
 ```python
-# Default to verification enabled
-verify = os.getenv("ROCINSIGHT_LLM_VERIFY_SSL", "1") != "0"
-if not verify:
-    warnings.warn("SSL verification disabled — LLM traffic is unprotected", stacklevel=2)
-client = httpx.Client(verify=verify)
+verify_ssl_env = os.environ.get("ROCINSIGHT_LLM_PRIVATE_VERIFY_SSL", "1").lower()
+verify_ssl = verify_ssl_env not in ("0", "false", "no")
+if not verify_ssl:
+    # httpx.Client(verify=False) only reached on explicit opt-in
 ```
+
+SSL verification is **enabled by default** and only disabled when the user sets `ROCINSIGHT_LLM_PRIVATE_VERIFY_SSL` explicitly. The env-var name (`_PRIVATE_`) signals the intended use case: private/internal LLM endpoints with self-signed certs. Tests cover the behaviour; README documents it in 4 places.
+
+### Outcome of review (2026-04-13)
+
+- **B501 as "critical vulnerability"** → **false-positive**. The gated opt-in with safe default is the textbook B501 remediation; the rule can't see the guard.
+- **Real UX/security gap** → the only `warnings.warn()` in the opt-out path fires when `httpx` is *missing*. When `httpx` is installed (the normal case) disabling verification is **silent** — users can reduce their security posture with zero console feedback.
+- **Fix**: hardening PR #4984 emits `warnings.warn()` at both opt-out sites so the opt-out is visible at runtime. Default path unchanged; 2 new tests (opt-out-warns + default-no-warning).
+
+### What this tells us
+
+- **First finding out of #6/#7/#8 worth a PR** — not a bug, but a measurable hardening.
+- **Signal-to-noise update**: Issues #5 + #6 + #7 + #8 combined: 3 bug-fix PRs + 1 hardening PR / ~281 reviewed ≈ 1.4% yielded a PR.
+- **Incidental fix**: the triage engine's bandit parser was silently dropping all 7,185 bandit findings because of log-preamble before the JSON — fixed in `nix/analysis/triage/parsers/generic.py` on this pass. Future runs will surface B501/other bandit findings correctly.
 
 ---
 
@@ -443,7 +454,7 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 6 | Unchecked HIP returns (core runtime) | HIGH | Correctness | 0 real / 65 in-scope (all macro-wrapped) | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 6b | Unchecked HIP returns (hip-tests) | MEDIUM | Correctness | ~3,700 test-code findings, un-triaged | TBD | 📋 Deferred — see §6 |
 | 7 | HIP double-free | HIGH | Correctness | 0 real / 14 unique (24 raw), all in hip-tests | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
-| 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
+| 8 | SSL verify=False | MEDIUM | Security | 2 opt-in sites in rocinsight (B501 false-positive + opt-out had no runtime warning) | 2 hours | 🟢 [#4984](https://github.com/ROCm/rocm-systems/pull/4984) |
 | 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
 | 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour | ⚪ Open |
 
