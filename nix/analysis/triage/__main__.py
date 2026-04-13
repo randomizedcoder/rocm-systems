@@ -16,7 +16,7 @@ import sys
 from parsers import load_all_findings
 from filters import filter_findings, deduplicate, is_test_code
 from anomalies import load_anomalies, apply_anomalies
-from reports import (
+from reporter import (
     print_summary, print_high_confidence, print_cross_ref,
     print_category, print_full_report, write_all_reports,
 )

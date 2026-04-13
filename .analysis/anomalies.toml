@@ -10,33 +10,135 @@
 #   confirmed-bug   -- verified real bug, tracked until fixed
 #   wont-fix        -- real issue but accepted risk (suppressed from reports)
 #
-# Per-anomaly analysis docs: .analysis/anomalies/<id>.md
-#
-# After running analysis, add entries here to triage findings.
-# On subsequent runs, suppressed/wont-fix entries are hidden from reports,
-# so any *new* findings immediately stand out.
+# Per-anomaly analysis docs (only for needs-review / confirmed-bug): .analysis/anomalies/<id>.md
+# Workflow guide: .analysis/README.md
 
-# ── Examples (uncomment and adapt as findings are triaged) ──────────
+# ──────────────────────────────────────────────────────────────────────
+# Issue #6 — Unchecked HIP API returns (semgrep hip-check rules)
+# Scope: 65 production findings in projects/rccl and projects/rocshmem
+# for hip-unchecked-{malloc,memcpy,launch}.
+# Preliminary review: analysis-reports/critical/06-unchecked-hip-returns.md
+# ──────────────────────────────────────────────────────────────────────
 
-# [[anomaly]]
-# id = "example-false-positive"
-# tool = "cppcheck"
-# check_id = "unusedFunction"
-# file = "projects/rocm-core/*"
-# code_anchor = ""
-# status = "false-positive"
-# reason = "Public API functions -- usage is external to this repo"
-# reviewer = "das"
-# date = "2026-04-11"
+# ─── rccl/src : CUDACHECK macro wrapper (1 finding) ───
+# rccl defines CUDACHECK in src/include/checks.h; it checks hipError_t
+# and goto fail / return ncclUnhandledCudaError. Semgrep sees the raw
+# hipMemcpy call and misses the wrapping macro.
 
-# [[anomaly]]
-# id = "example-confirmed-bug"
-# tool = "cppcheck"
-# check_id = "uninitMemberVar"
-# file = "experimental/perf-dkms/src/aql_c/pm4_packets.h"
-# code_anchor = "bitfield"
-# status = "confirmed-bug"
-# github_issue = ""
-# reason = "2-bit bitfield test coverage gap"
-# reviewer = "das"
-# date = "2026-04-11"
+[[anomaly]]
+id = "rccl-src-cudacheck-wrapper-fp-memcpy"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-memcpy"
+file = "projects/rccl/src/**"
+code_anchor = "CUDACHECK"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in rccl's CUDACHECK macro (src/include/checks.h) which checks hipError_t and propagates via ncclResult_t."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rccl/tools : HIP_CALL macro wrapper ───
+# rccl's tools/ benchmarks define HIP_CALL(cmd) which checks the result
+# and exit(-1) on error. Applies to most rccl/tools/ findings.
+
+[[anomaly]]
+id = "rccl-tools-hip-call-wrapper-fp-malloc"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-malloc"
+file = "projects/rccl/tools/**"
+code_anchor = "HIP_CALL"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in rccl/tools HIP_CALL macro (checks hipError_t and exit(-1) on failure)."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rccl-tools-hip-call-wrapper-fp-memcpy"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-memcpy"
+file = "projects/rccl/tools/**"
+code_anchor = "HIP_CALL"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in rccl/tools HIP_CALL macro (checks hipError_t and exit(-1) on failure)."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rccl/tools/p2p-latency-test : HIPCHECK macro wrapper (4 findings) ───
+
+[[anomaly]]
+id = "rccl-tools-p2p-hipcheck-wrapper-fp-malloc"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-malloc"
+file = "projects/rccl/tools/p2p-latency-test/**"
+code_anchor = "HIPCHECK"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in p2p-latency-test HIPCHECK macro (checks hipError_t and exits on failure)."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rccl/tools/ib-test : bare hipLaunchKernelGGL with deferred error check (2 findings) ───
+# ib_test.cpp lines 360 and 520 launch kernels without an immediate
+# error check, but errors surface via CUDACHECK(hipDeviceSynchronize())
+# at lines 622 and 645 before results are consumed. Standard deferred-
+# error pattern; not a real bug in this microbenchmark tool.
+
+[[anomaly]]
+id = "rccl-tools-ib-test-bare-launch-deferred-sync-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-launch"
+file = "projects/rccl/tools/ib-test/ib_test.cpp"
+code_anchor = "hipLaunchKernelGGL"
+anchor_window = 2
+status = "false-positive"
+reason = "Bare kernel launch; launch errors surface via CUDACHECK(hipDeviceSynchronize()) later in the same test loop (lines 622, 645). Microbenchmark tool, not production library code."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rccl/tools/JitterBench : bare launch + HIP_CALL sync (3 findings) ───
+# JitterBench.cpp:295 bare hipLaunchKernelGGL followed by
+# HIP_CALL(hipStreamSynchronize) at line 305. Same pattern as ib-test.
+# malloc/memcpy findings in JitterBench are HIP_CALL-wrapped.
+
+[[anomaly]]
+id = "rccl-tools-jitterbench-bare-launch-deferred-sync-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-launch"
+file = "projects/rccl/tools/JitterBench/JitterBench.cpp"
+code_anchor = "hipLaunchKernelGGL"
+anchor_window = 2
+status = "false-positive"
+reason = "Bare kernel launch; launch errors surface via HIP_CALL(hipStreamSynchronize) ~10 lines below. Microbenchmark tool."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── rocshmem : CHECK_HIP macro wrapper (42 findings, src + examples) ───
+# rocshmem defines CHECK_HIP in src/util.hpp which checks hipError_t,
+# prints diagnostics, and abort()s. All 42 findings across src/ and
+# examples/ are wrapped in CHECK_HIP.
+
+[[anomaly]]
+id = "rocshmem-check-hip-macro-fp-malloc"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-malloc"
+file = "projects/rocshmem/**"
+code_anchor = "CHECK_HIP"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in rocshmem's CHECK_HIP macro (src/util.hpp) which checks hipError_t, prints diagnostics, and abort()s on failure."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "rocshmem-check-hip-macro-fp-memcpy"
+tool = "semgrep"
+check_id = "nix.store.hip-unchecked-memcpy"
+file = "projects/rocshmem/**"
+code_anchor = "CHECK_HIP"
+anchor_window = 2
+status = "false-positive"
+reason = "Call is wrapped in rocshmem's CHECK_HIP macro (src/util.hpp) which checks hipError_t, prints diagnostics, and abort()s on failure."
+reviewer = "das"
+date = "2026-04-13"

@@ -1,5 +1,7 @@
 # Issue 6: Unchecked HIP API Returns in Core Runtime
 
+> **Triage status (2026-04-13):** All 65 in-scope production findings recorded in [`.analysis/anomalies.toml`](../../.analysis/anomalies.toml) — **0 real bugs, 65 false positives** (all wrapped by `CUDACHECK` / `HIP_CALL` / `HIPCHECK` / `CHECK_HIP` macros the semgrep rule does not recognise). See [`CRITICAL-ISSUES.md` §6](../../CRITICAL-ISSUES.md#issue-6-unchecked-hip-api-returns-in-core-runtime-rccl-rocshmem--full-analysis) for the outcome table; this document retains the preliminary narrative for historical context.
+
 **Date:** 2026-04-11
 **Severity:** HIGH (production runtime code), MEDIUM (test code)
 **Tools:** semgrep (hip-unchecked-malloc, hip-unchecked-memcpy, hip-unchecked-launch rules)

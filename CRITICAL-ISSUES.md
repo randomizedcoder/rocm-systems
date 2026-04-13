@@ -220,14 +220,15 @@ Fix applied in [#4951](https://github.com/ROCm/rocm-systems/pull/4951): copy the
 
 ---
 
-## Issue #6: Unchecked HIP API Returns in Core Runtime (clr, rccl, rocshmem) — [Full Analysis](analysis-reports/critical/06-unchecked-hip-returns.md)
+## Issue #6: Unchecked HIP API Returns in Core Runtime (rccl, rocshmem) — [Full Analysis](analysis-reports/critical/06-unchecked-hip-returns.md)
 
-**Severity**: HIGH
-**Files**: ~300 non-test locations in clr (150), rccl (128), rocshmem (74)
+**Status**: 🔵 Triaged, no action required — 0 real bugs in scope
+**Severity**: HIGH (as classified by the rule); effective severity LOW after review
+**Scope reviewed**: 65 production findings in `projects/rccl` (26) and `projects/rocshmem` (42) — **not** the ~300 quoted originally (see "Count correction" below)
 **Tools**: hip-check + semgrep-cpp (hip-unchecked-malloc, hip-unchecked-memcpy, hip-unchecked-launch)
 **Exploitability**: N/A — correctness/reliability
 
-### The Bug
+### The Bug (as the rule would catch it)
 
 ```cpp
 hipMalloc(&dev_ptr, size);      // returns hipErrorOutOfMemory — IGNORED
@@ -235,25 +236,38 @@ hipMemcpy(dst, src, size, ...); // returns hipErrorInvalidValue — IGNORED
 kernel<<<grid, block>>>(...);   // launch may fail — IGNORED
 ```
 
-HIP API calls return `hipError_t` status codes. When memory allocation fails, `dev_ptr` remains null. When memcpy fails, destination contains stale/zero data. When a kernel fails to launch, no computation happens.
+HIP API calls return `hipError_t`. If the result is dropped, failures become silent: null pointers, stale/zero buffers, missing kernel output.
 
-### Impact
-- **Silent wrong results in AI/ML training**: A failed `hipMalloc` followed by an unchecked `hipMemcpy` and kernel launch produces garbage gradients. The training loop continues with wrong values. Model appears to "train" but produces nonsense.
-- **rccl (collective communications)**: Failed allocations in all-reduce operations cause gradient divergence across nodes — distributed training silently produces a broken model.
+### Outcome of review (2026-04-13)
 
-### Fix
-```cpp
-#define HIP_CHECK(call) do { \
-    hipError_t err = (call); \
-    if (err != hipSuccess) { \
-        fprintf(stderr, "HIP error %s at %s:%d\n", \
-                hipGetErrorString(err), __FILE__, __LINE__); \
-        abort(); \
-    } \
-} while(0)
+| Category | Count | Disposition |
+|---|---|---|
+| `rccl/src` — wrapped in `CUDACHECK` macro (`src/include/checks.h`) | 1 | false-positive (macro wraps the call) |
+| `rccl/tools/**` — wrapped in `HIP_CALL` macro (per-tool) | 13 | false-positive |
+| `rccl/tools/p2p-latency-test` — wrapped in `HIPCHECK` macro | 4 | false-positive |
+| `rccl/tools/ib-test/ib_test.cpp` — bare kernel launch, deferred `CUDACHECK(hipDeviceSynchronize)` at lines 622/645 | 2 | false-positive (standard deferred-error pattern in a microbenchmark) |
+| `rccl/tools/JitterBench` — bare kernel launch, deferred `HIP_CALL(hipStreamSynchronize)` ~10 lines below; malloc/memcpy are `HIP_CALL`-wrapped | 3 | false-positive |
+| `rocshmem/src/**` and `rocshmem/examples/**` — wrapped in `CHECK_HIP` macro (`src/util.hpp`, aborts on failure) | 42 | false-positive |
+| **Total in scope** | **65** | **0 real bugs** |
 
-HIP_CHECK(hipMalloc(&dev_ptr, size));
-```
+All 65 are now recorded as pattern-glob anomalies in [`.analysis/anomalies.toml`](.analysis/anomalies.toml) with `code_anchor` matching the wrapping macro, so subsequent analysis runs auto-suppress them. The triage workflow is documented in [`.analysis/README.md`](.analysis/README.md).
+
+### Count correction
+
+The original "~300 non-test locations in clr (150), rccl (128), rocshmem (74)" reflected a pre-filter count. After filtering to the three specific check-IDs that define this issue, in the four core-runtime projects:
+
+- **clr**: 0 findings (the rule doesn't match this codebase — CLR uses `ihipMalloc`-style internal APIs that the rule doesn't recognise)
+- **rccl**: 26 production findings (all false-positive — see table)
+- **rocshmem**: 42 production findings (all false-positive — `CHECK_HIP` wrapper)
+- **rocr-runtime**: 0 (uses the HSA API, not HIP; rule does not apply)
+
+**Total: 65 production findings, 0 real bugs.** Out-of-scope sibling findings (in `hip-tests/`, `rocprofiler-systems/` examples, etc.) remain un-triaged and may still contain real issues — those are deferred to a separate pass.
+
+### What this tells us
+
+- The rule is noisy on rccl/rocshmem because both projects have mature, consistent error-checking macros the rule doesn't recognise. An obvious rule improvement: teach semgrep-hip to treat `CUDACHECK(...)`, `HIP_CALL(...)`, `CHECK_HIP(...)` as checked calls. Tracked as a follow-up to this pass.
+- Real risk for this class is more likely to live in example/sample code (e.g. `rocprofiler-systems/.../transpose.new.cpp`) and ad-hoc scripts, not in the core runtime libraries. A follow-up triage pass should target those.
+- **Signal-to-noise update**: Issue #5 found 3 real / ~200 findings (~1.5%). Issue #6 found 0 real / 65. Combined so far: 3 real / ~265 (~1.1%). The 1%-ish extrapolation for the full ~20 k backlog is holding.
 
 ---
 
@@ -396,7 +410,7 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 3 | sscanf buffer overflow | HIGH | Security | amdsmi (22 locations) | 4 hours | ⚪ Open |
 | 4 | memcpy sizeof(ptr) | HIGH | Correctness | 100 locations | 8 hours | ⚪ Open |
 | 5 | Dangling .c_str() | HIGH | Correctness | 3 real / 59 raw | 4 hours | 🟢 [#4951](https://github.com/ROCm/rocm-systems/pull/4951) |
-| 6 | Unchecked HIP returns | HIGH | Correctness | 300 runtime locations | 16 hours | ⚪ Open |
+| 6 | Unchecked HIP returns | HIGH | Correctness | 0 real / 65 in-scope (all macro-wrapped) | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours | ⚪ Open |
 | 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
 | 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
