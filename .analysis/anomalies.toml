@@ -142,3 +142,112 @@ status = "false-positive"
 reason = "Call is wrapped in rocshmem's CHECK_HIP macro (src/util.hpp) which checks hipError_t, prints diagnostics, and abort()s on failure."
 reviewer = "das"
 date = "2026-04-13"
+
+# ──────────────────────────────────────────────────────────────────────
+# Issue #7 — HIP double-free (semgrep hip-double-free rule)
+# Scope: 24 raw findings, all in projects/hip-tests/. No runtime hits.
+# All 24 are false-positives with 4 distinct root causes (the rule
+# doesn't model scope, reallocation, Catch2 SECTION semantics, or
+# the idiomatic hipFree(nullptr) runtime-init pattern).
+# ──────────────────────────────────────────────────────────────────────
+
+# ─── 1. Intentional test of double-free behaviour ───
+# hipFree.cc:204 (Unit_hipFreeDoubleDevice) and the sibling
+# Unit_hipFreeDoubleHost test the runtime's response to a double-free
+# on purpose: the second free is wrapped in
+# HIP_CHECK_ERROR(..., hipErrorInvalidValue) which asserts the error.
+
+[[anomaly]]
+id = "hip-tests-intentional-double-free-test-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/memory/hipFree.cc"
+code_anchor = "HIP_CHECK_ERROR(hipFree"
+anchor_window = 3
+status = "false-positive"
+reason = "This is the test that intentionally double-frees to verify hipFree returns hipErrorInvalidValue. The second call is wrapped in HIP_CHECK_ERROR(..., hipErrorInvalidValue)."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── 2. hipFree(nullptr) runtime-init idiom ───
+# Several texture-ref tests call hipFree(nullptr) at the top of the test
+# as a way to force HIP runtime init, then genuinely free a real pointer
+# later. Two different pointers; not a double-free.
+
+[[anomaly]]
+id = "hip-tests-texture-nullptr-init-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/texture/**"
+code_anchor = "hipFree(nullptr)"
+anchor_window = 50
+status = "false-positive"
+reason = "hipFree(nullptr) idiom to force HIP runtime init, followed by a real free of a different pointer (tex_buffer). Two distinct pointers; not a double-free."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── 3. Free → realloc → free (rule doesn't model reallocation) ───
+# hipPointerGetAttribute.cc:186 and hipMemRangeGetAttribute_old.cc:70,80
+# follow the pattern: hipFree(p); hipMalloc(&p, ...); ... hipFree(p);
+# The pointer variable is reused, but it points to a fresh allocation
+# between the two frees.
+
+[[anomaly]]
+id = "hip-tests-realloc-between-frees-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/memory/hipPointerGetAttribute.cc"
+code_anchor = "hipMalloc"
+anchor_window = 3
+status = "false-positive"
+reason = "Pointer variable is reused but reallocated via hipMalloc/hipMallocManaged between the two hipFree calls. No double-free; the rule does not model reallocation."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "hip-tests-realloc-memrange-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/memory/hipMemRangeGetAttribute_old.cc"
+code_anchor = "hipMallocManaged"
+anchor_window = 3
+status = "false-positive"
+reason = "Pointer variable is reused but reallocated via hipMallocManaged between the two hipFree calls. No double-free; the rule does not model reallocation."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── 4. Catch2 SECTION semantics (each section re-runs fixture) ───
+# hipTestMemKernel.cc:113-115 sits inside a HIP_TEST_CASE with multiple
+# SECTIONs. Each section re-runs the fixture (fresh mallocs at the top,
+# frees at the bottom), so the frees at 113-115 fire once per section.
+# The rule reports 4 copies of each line because Catch2 expands
+# GENERATE / SECTION combinatorially. Not a double-free.
+
+[[anomaly]]
+id = "hip-tests-catch2-section-expansion-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/kernel/hipTestMemKernel.cc"
+code_anchor = "SECTION"
+anchor_window = 20
+status = "false-positive"
+reason = "Findings are triggered by Catch2 SECTION expansion — each SECTION reruns the test fixture with fresh hipMalloc/hipFree pairs. Not a double-free; rule does not model SECTION semantics."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── 5. Per-test-case scope (rule doesn't respect function boundaries) ───
+# assert.cc has three separate HIP_TEST_CASE blocks, each with its own
+# local `d_a` and its own hipMalloc/hipFree pair. The rule sees three
+# hipFree(d_a) calls in the same file and flags them.
+
+[[anomaly]]
+id = "hip-tests-per-test-case-scope-fp"
+tool = "semgrep"
+check_id = "nix.store.hip-double-free"
+file = "projects/hip-tests/catch/unit/assertion/assert.cc"
+code_anchor = "HIP_TEST_CASE"
+anchor_window = 50
+status = "false-positive"
+reason = "Each hipFree(d_a) is in a separate HIP_TEST_CASE with its own local hipMalloc. The rule does not respect function scope."
+reviewer = "das"
+date = "2026-04-13"

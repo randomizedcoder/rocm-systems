@@ -289,32 +289,44 @@ Tracking this as **#6b** rather than a new top-ten slot because the rule + scope
 
 ---
 
-## Issue #7: HIP Double-Free on GPU Memory (11 locations) — [Full Analysis](analysis-reports/critical/07-hip-double-free.md)
+## Issue #7: HIP Double-Free on GPU Memory — [Full Analysis](analysis-reports/critical/07-hip-double-free.md)
 
-**Severity**: HIGH
-**Files**: 11 locations, primarily in hip-tests but pattern may exist in runtime
+**Status**: 🔵 Triaged, no action required — 0 real bugs
+**Severity**: HIGH (as classified by the rule); effective severity N/A after review
+**Scope reviewed**: 24 raw findings (14 after dedup), **all in `projects/hip-tests/`** — 0 in any runtime/library code
 **Tools**: hip-check (hip-double-free rule)
-**Exploitability**: N/A — crash/corruption
+**Exploitability**: N/A — crash/corruption *if it were real*
 
-### The Bug
+### The Bug (as the rule would catch it)
 
 ```cpp
 hipFree(dev_ptr);
 // ... some code paths ...
-hipFree(dev_ptr);  // double-free
+hipFree(dev_ptr);  // double-free would corrupt the GPU allocator
 ```
 
-Calling `hipFree` twice on the same pointer corrupts the GPU memory allocator. The same GPU memory may be returned by a subsequent `hipMalloc`, leading to two different buffers aliasing the same physical memory.
+A real double-free would let the same GPU memory be returned by a later `hipMalloc`, aliasing two buffers onto one physical region — a data-corruption bug that's hard to diagnose.
 
-### Impact
-- GPU memory corruption
-- Two kernels writing to the same physical memory simultaneously
-- Silent data corruption in AI/ML workloads
-- Hard to diagnose — may only manifest under specific allocation patterns
+### Outcome of review (2026-04-13)
 
-### Fix
-Set pointer to null after free: `hipFree(dev_ptr); dev_ptr = nullptr;`
-Or use RAII wrappers that prevent double-free by design.
+All 24 findings are false-positives across 4 distinct rule-precision failures:
+
+| Root cause | Locations | Disposition |
+|---|---|---|
+| **Intentional test of double-free behaviour** — `Unit_hipFreeDoubleDevice` deliberately frees twice and asserts the second call returns `hipErrorInvalidValue` (via `HIP_CHECK_ERROR`) | `hipFree.cc:204` | false-positive (it's the test _for_ this behaviour) |
+| **`hipFree(nullptr)` runtime-init idiom** — called at the top of a test to force HIP init; the real free later is on a different pointer (`tex_buffer`) | `texture/hipTexRef{Get,Set}Address.cc` (6) | false-positive (two distinct pointers) |
+| **Free → `hipMalloc(Managed)` → free** — pointer variable is reused but reallocated between the two frees | `hipPointerGetAttribute.cc:186`, `hipMemRangeGetAttribute_old.cc:70,80` (3) | false-positive (rule doesn't model reallocation) |
+| **Catch2 SECTION expansion** — each `SECTION` re-runs the fixture with fresh malloc/free pairs; `GENERATE` combinatorics cause each line to be reported 4× | `hipTestMemKernel.cc:113–115` (12 raw → 3 dedup) | false-positive (rule doesn't model SECTION semantics) |
+| **Per-test-case scope** — three separate `HIP_TEST_CASE` blocks, each with its own local `d_a` and its own malloc/free; the rule doesn't respect function boundaries | `assert.cc:129` (+ sibling lines in adjacent test cases) | false-positive |
+| **Total** | **14 unique / 24 raw** | **0 real bugs** |
+
+All recorded as pattern-glob anomalies in [`.analysis/anomalies.toml`](.analysis/anomalies.toml); triage CLI confirms 0 unknown `hip-double-free` findings remain.
+
+### What this tells us
+
+- The `hip-double-free` rule has **no runtime-code hits** in the entire repository — it only fires on tests. That's itself a useful signal: the production memory-management code is clean under this check.
+- Every false positive comes from a rule-precision limitation (no scope model, no reallocation model, no Catch2 awareness). A precision-improvement pass on `nix/analysis/rules/semgrep-hip.yaml` could eliminate most of them at source.
+- **Signal-to-noise update**: Issues #5 + #6 + #7 combined: 3 real / ~279 reviewed ≈ **1.08%**. Still tracking the 1%-ish extrapolation for the full backlog.
 
 ---
 
@@ -430,7 +442,7 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 5 | Dangling .c_str() | HIGH | Correctness | 3 real / 59 raw | 4 hours | 🟢 [#4951](https://github.com/ROCm/rocm-systems/pull/4951) |
 | 6 | Unchecked HIP returns (core runtime) | HIGH | Correctness | 0 real / 65 in-scope (all macro-wrapped) | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 6b | Unchecked HIP returns (hip-tests) | MEDIUM | Correctness | ~3,700 test-code findings, un-triaged | TBD | 📋 Deferred — see §6 |
-| 7 | HIP double-free | HIGH | Correctness | 11 locations | 2 hours | ⚪ Open |
+| 7 | HIP double-free | HIGH | Correctness | 0 real / 14 unique (24 raw), all in hip-tests | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 8 | SSL verify=False | HIGH | Security | rocinsight LLM client | 1 hour | ⚪ Open |
 | 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 207 locations | 8 hours | ⚪ Open |
 | 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour | ⚪ Open |

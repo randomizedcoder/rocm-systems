@@ -1,5 +1,7 @@
 # Issue 7: HIP Double-Free on GPU Memory
 
+> **Triage status (2026-04-13):** All 24 raw findings (14 after dedup) recorded in [`.analysis/anomalies.toml`](../../.analysis/anomalies.toml) — **0 real bugs**. All findings are in `projects/hip-tests/` (no runtime hits) and fall into 4 rule-precision failure modes (intentional double-free test, `hipFree(nullptr)` init idiom, free→realloc→free, Catch2 SECTION expansion, per-test-case scope). See [`CRITICAL-ISSUES.md` §7](../../CRITICAL-ISSUES.md#issue-7-hip-double-free-on-gpu-memory--full-analysis) for the outcome table.
+
 **Date:** 2026-04-11
 **Severity:** HIGH (if real), LOW (if false positive)
 **Tools:** semgrep (hip-double-free rule)
