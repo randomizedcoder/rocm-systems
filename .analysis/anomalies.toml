@@ -596,3 +596,175 @@ status = "false-positive"
 reason = "glibc (the only ROCm target) implements strerror() using a thread-local buffer; calls are de facto thread-safe. All findings are in error-logging paths where the worst case is a garbled log message, not data corruption. Per-call migration to strerror_r would conflict with POSIX/GNU signature divergence for no practical gain. See analysis-reports/critical/09-thread-unsafe-functions.md Part B."
 reviewer = "das"
 date = "2026-04-13"
+
+# ──────────────────────────────────────────────────────────────────────
+# Case coverage — gfxip-incomplete-dispatch (Phase 1 triage)
+# Scope: 12 findings from semgrep rule `gfxip-incomplete-dispatch`.
+# Tracking: CASE-COVERAGE-TRIAGE.md
+# ──────────────────────────────────────────────────────────────────────
+
+# ─── #1: rocr-runtime RegisterAgent — all 3 device types handled ───
+
+[[anomaly]]
+id = "gfxip-rocr-runtime-register-agent-fp"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp"
+code_anchor = "kAmdGpuDevice"
+anchor_window = 5
+status = "false-positive"
+reason = "RegisterAgent (line 176) handles all 3 device types: kAmdCpuDevice (181), kAmdGpuDevice (226), kAmdAieDevice (237). Complete if-else-if chain."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #2: rocr-runtime SVM prefetch — AIE falls to fallback ───
+
+[[anomaly]]
+id = "gfxip-rocr-runtime-svm-prefetch-needs-review"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocr-runtime/runtime/hsa-runtime/core/runtime/runtime.cpp"
+code_anchor = "kAmdGpuDevice"
+anchor_window = 10
+status = "needs-review"
+reason = "SvmBatchDiscard (line 3493) handles kAmdCpuDevice (skip) and kAmdGpuDevice (get nearest CPU) but kAmdAieDevice falls through to 'if (!cpu)' fallback (use first CPU). Likely intentional but undocumented."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #3: clr hip_conversions.hpp — all hipFormat values covered ───
+
+[[anomaly]]
+id = "gfxip-clr-hip-conversions-fp"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/clr/hipamd/src/hip_conversions.hpp"
+code_anchor = "hipReadMode"
+anchor_window = 5
+status = "false-positive"
+reason = "getCLChannelType (line 15) covers all 8 HIP_AD_FORMAT_* enum values in both switch blocks. Line 56 handles unknown hipReadMode with 'return {}'. Complete."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #4: clr paldevice.cpp — mipFilter defaults to no-filter via zero-init ───
+
+[[anomaly]]
+id = "gfxip-clr-paldevice-mipfilter-fp"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/clr/rocclr/device/pal/paldevice.cpp"
+code_anchor = "mipFilter"
+anchor_window = 3
+status = "false-positive"
+reason = "fillHwSampler (line 2311) if-else for CL_FILTER_NEAREST/CL_FILTER_LINEAR. Third case (CL_FILTER_NONE) intentionally leaves default zero-init from 'Pal::SamplerInfo samplerInfo = {}' at line 2293."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #5: aqlprofile gfx940_factory — latent bug, InitSpmBlockDelayTable ───
+
+[[anomaly]]
+id = "gfxip-aqlprofile-spm-delay-table-latent"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/aqlprofile/src/core/gfx940_factory.cpp"
+code_anchor = "MI300_GPU_ID"
+anchor_window = 5
+status = "confirmed-bug"
+reason = "InitSpmBlockDelayTable (line 141) dispatches on MI300_GPU_ID and MI350_GPU_ID with no default. Currently unreachable via normal dispatch (Pm4Factory::Create switch prevents it), but a future MI-series GPU inheriting Mi300Factory would silently leave delay tables uninitialized. Convert to switch + default throw to match Pm4Factory::Create pattern. See .analysis/anomalies/aqlprofile-spm-delay-table-latent-bug.md"
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #6: aqlprofile navi_reg_init — only gc+athub handled ───
+
+[[anomaly]]
+id = "gfxip-aqlprofile-navi-reg-init-needs-review"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/aqlprofile/src/core/navi_reg_init.cpp"
+code_anchor = "ipname"
+anchor_window = 5
+status = "needs-review"
+reason = "navi_ip_offset_table_discovery_sysfs (line 93) handles only 'gc' and 'athub' out of 20+ IP blocks. Vega20 hardcoded version initializes all 20. May be intentional (profiler only needs GC+ATHUB on Navi) or incomplete port."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #7/#8: rocprofiler-sdk vendored copies (identical to #5/#6) ───
+
+[[anomaly]]
+id = "gfxip-rocprofiler-sdk-spm-delay-table-latent"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocprofiler-sdk/source/lib/aqlprofile/core/gfx940_factory.cpp"
+code_anchor = "MI300_GPU_ID"
+anchor_window = 5
+status = "confirmed-bug"
+reason = "Vendored copy of aqlprofile finding #5. Same latent bug — InitSpmBlockDelayTable missing default case. Fix should be applied to both copies."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "gfxip-rocprofiler-sdk-navi-reg-init-needs-review"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocprofiler-sdk/source/lib/aqlprofile/core/navi_reg_init.cpp"
+code_anchor = "ipname"
+anchor_window = 5
+status = "needs-review"
+reason = "Vendored copy of aqlprofile finding #6. Same question — only gc+athub handled."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #9: rocprofiler-sdk agent.cpp — only CPU+GPU agent types exist ───
+
+[[anomaly]]
+id = "gfxip-rocprofiler-sdk-agent-type-fp"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocprofiler-sdk/source/lib/rocprofiler-sdk/agent.cpp"
+code_anchor = "ROCPROFILER_AGENT_TYPE_GPU"
+anchor_window = 5
+status = "false-positive"
+reason = "Agent property population (line 773) handles GPU and CPU types — the only two valid ROCPROFILER_AGENT_TYPE values. No missing case."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #10: rocdecode num_layers dispatch ───
+
+[[anomaly]]
+id = "gfxip-rocdecode-num-layers-needs-review"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocdecode/src/rocdecode/roc_decoder.cpp"
+code_anchor = "num_layers"
+anchor_window = 5
+status = "needs-review"
+reason = "GetVideoFrame (line 179) handles num_layers==2 and num_layers==3 but not num_layers==1 (single-plane packed formats). dev_mem_ptr[0] is always set; [1]/[2] left unset for single-layer. Need maintainer confirmation on whether callers use ptr[1]/[2] when layers==1."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #11: rocjpeg surface_format dispatch ───
+
+[[anomaly]]
+id = "gfxip-rocjpeg-surface-format-needs-review"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocjpeg/src/rocjpeg_decoder.cpp"
+code_anchor = "surface_format"
+anchor_window = 5
+status = "needs-review"
+reason = "GetPlanarYUVOutputFormat (line 653) handles YUY2, NV12, 444P, 422V but no else. A new VA surface format silently returns SUCCESS without copying chroma channels."
+reviewer = "das"
+date = "2026-04-13"
+
+# ─── #12: TransferBench example code — wont-fix ───
+
+[[anomaly]]
+id = "gfxip-transferbench-blockorder-wontfix"
+tool = "semgrep"
+check_id = "nix.store.gfxip-incomplete-dispatch"
+file = "projects/rocprofiler-systems/examples/transferBench/TransferBench.hpp"
+code_anchor = "blockOrder"
+anchor_window = 5
+status = "wont-fix"
+reason = "Example/benchmark code. blockOrder only valid as 0/1/2 per TransferBench config. Low priority."
+reviewer = "das"
+date = "2026-04-13"
