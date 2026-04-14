@@ -269,7 +269,7 @@ date = "2026-04-13"
 # std:: namespace-qualified strtok calls. They are documented in:
 #   .analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md
 #   .analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md
-# and tracked in CRITICAL-ISSUES.md §9. Fix PR pending.
+# and tracked in CRITICAL-ISSUES.md §9. Fixed in PR #5010.
 
 # ─── RCCL strtok: initialization / topology / debug parsing (FP) ───
 # rccl/src/debug.cc strtok calls are all inside ncclDebugInit() which
@@ -552,6 +552,40 @@ date = "2026-04-13"
 # would incur POSIX vs GNU signature conflicts with no practical benefit.
 
 [[anomaly]]
+# ──────────────────────────────────────────────────────────────────────
+# Issue #10 — strncat buffer overflow (flawfinder level 5)
+# Scope: 3 locations in hip-tests (hipDeviceGetUuid.cc:150,240 and
+# getUUIDfrmRocinfo_Exe.cc:30). All pass COMMAND_LEN (total buffer
+# size) as strncat's 3rd arg instead of remaining space.
+# Detailed review: analysis-reports/critical/10-strncat-overflow.md
+# Outcome: Overflow cannot trigger — hardcoded literals total 25 chars
+# in a 256-byte buffer. Test-only code, no user input. wont-fix.
+# ──────────────────────────────────────────────────────────────────────
+
+[[anomaly]]
+id = "hip-tests-strncat-uuid-command-wontfix"
+tool = "flawfinder"
+check_id = "strncat"
+file = "projects/hip-tests/catch/unit/device/hipDeviceGetUuid.cc"
+code_anchor = "strncat(command"
+anchor_window = 2
+status = "wont-fix"
+reason = "strncat 3rd arg is total buffer size (256) not remaining space, but overflow cannot trigger: hardcoded literals total 25 chars in 256-byte buffer. Test infrastructure only, no user-controlled input. Trivial fix (single snprintf) but zero practical risk."
+reviewer = "das"
+date = "2026-04-13"
+
+[[anomaly]]
+id = "hip-tests-strncat-uuid-exe-wontfix"
+tool = "flawfinder"
+check_id = "strncat"
+file = "projects/hip-tests/catch/unit/device/getUUIDfrmRocinfo_Exe.cc"
+code_anchor = "strncat(command"
+anchor_window = 2
+status = "wont-fix"
+reason = "Same pattern as hipDeviceGetUuid.cc — hardcoded literals, 256-byte buffer, test helper executable. Cannot overflow."
+reviewer = "das"
+date = "2026-04-13"
+
 id = "strerror-glibc-tls-thread-safe-fp"
 tool = "semgrep"
 check_id = "nix.store.strerror-thread-unsafe"

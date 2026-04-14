@@ -1,6 +1,6 @@
 # rocjpeg GetVisibleDevices: strtok on getenv() return
 
-**Status:** confirmed-bug
+**Status:** 🟢 fixed — [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010)
 **Tool:** cpplint `runtime/threadsafe_fn`
 **File:** `projects/rocjpeg/src/rocjpeg_vaapi_decoder.cpp:937, 940`
 **Reviewed:** 2026-04-13
@@ -44,7 +44,7 @@ since they share a root cause.
 
 ## Follow-up
 
-To file: upstream PR against ROCm/rocm-systems touching both
-`rocdecode` and `rocjpeg`. Test with `ROCR_VISIBLE_DEVICES=0,1,2` that a
-subsequent `std::getenv("ROCR_VISIBLE_DEVICES")` returns the original
-comma-separated value, not the truncated first token.
+Fixed in [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010)
+— hardened single-pass `ParseVisibleDevicesCsv()` helper with strict
+`[0-9,]` charset, length/digit/range caps, and 9 unit tests per
+sub-project. Covers both rocdecode and rocjpeg in one PR.

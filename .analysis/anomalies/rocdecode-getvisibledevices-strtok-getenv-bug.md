@@ -1,6 +1,6 @@
 # rocdecode GetVisibleDevices: strtok on getenv() return
 
-**Status:** confirmed-bug
+**Status:** 🟢 fixed — [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010)
 **Tool:** cpplint `runtime/threadsafe_fn`
 **File:** `projects/rocdecode/src/rocdecode/vaapi/vaapi_videodecoder.cpp:1012, 1015`
 **Reviewed:** 2026-04-13
@@ -64,6 +64,7 @@ exactly once per process.
 
 ## Follow-up
 
-To file: upstream PR against ROCm/rocm-systems in the `rocdecode`
-sub-project. Pair with the identical `rocjpeg` fix
-(see `rocjpeg-getvisibledevices-strtok-getenv-bug.md`).
+Fixed in [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010)
+— hardened single-pass `ParseVisibleDevicesCsv()` helper with strict
+`[0-9,]` charset, length/digit/range caps, and 9 unit tests per
+sub-project. Covers both rocdecode and rocjpeg in one PR.

@@ -253,3 +253,11 @@ static constexpr uint64_t BUFFER_LEN = 512;
 ```
 
 `BUFFER_LEN` (512) is used for reading `popen` output, not for the command buffer. `COMMAND_LEN` (256) is used for both the buffer declaration and (incorrectly) as the strncat size limit.
+
+---
+
+## Triage Decision
+
+**Status**: 🔵 Triaged — wont-fix
+**Reviewed**: 2026-04-13
+**Decision**: No PR filed. Overflow cannot trigger with hardcoded literals in a 256-byte buffer. All sites are in test infrastructure (never ships to users). Added to [`.analysis/anomalies.toml`](../../.analysis/anomalies.toml) as `wont-fix`.

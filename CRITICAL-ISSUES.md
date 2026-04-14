@@ -375,7 +375,7 @@ SSL verification is **enabled by default** and only disabled when the user sets 
 
 ## Issue #9: Thread-Unsafe Functions in Multi-Threaded GPU Runtime — [Full Analysis](analysis-reports/critical/09-thread-unsafe-functions.md)
 
-**Status (2026-04-13): 🔵 Triaged — 2 real bugs identified (not thread-safety but `strtok`-on-`getenv` UB); pass-through bulk of findings are false-positive.**
+**Status (2026-04-13): 🟢 Fix submitted — [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010). 2 real bugs fixed (`strtok`-on-`getenv` UB + unvalidated user-controlled env-var input); bulk of remaining findings are false-positive.**
 
 **Severity**: MEDIUM-HIGH (for the 2 real bugs); lint-noise for the rest
 **Findings (corrected)**: 121 cpplint `runtime/threadsafe_fn` (79 prod / 42 test) + 156 semgrep `strerror-thread-unsafe` = **277 total** (earlier count of 207 under-counted strerror).
@@ -386,7 +386,7 @@ SSL verification is **enabled by default** and only disabled when the user sets 
 
 | Bucket | Count | Classification | Notes |
 |---|---|---|---|
-| `std::strtok` on `std::getenv()` return (rocdecode + rocjpeg `GetVisibleDevices`) | 2 sites | **confirmed-bug** | UB: `strtok` writes into the process environment. Not surfaced by cpplint (namespaced form); found by manual review. Fix pending. |
+| `std::strtok` on `std::getenv()` return (rocdecode + rocjpeg `GetVisibleDevices`) | 2 sites | **confirmed-bug** 🟢 | UB: `strtok` writes into the process environment. Not surfaced by cpplint (namespaced form); found by manual review. **Fixed in [#5010](https://github.com/ROCm/rocm-systems/pull/5010).** |
 | `strtok` in init/topology/env-parse (rccl `src/`, `cpuset.h`, `debug.cc`, `archinfo.cc`, CLR `paldevice`, rocr-runtime `libhsakmt`) | ~20 sites | false-positive | One-time init, often under mutex; operates on `strdup`'d copies. |
 | `strtok` in samples / tests / CLI tooling (rccl `tools/`, `ext-tuner/`, `rccl-tests`, `rocdecode/samples/`, `experimental/perf-dkms`) | ~10 sites | false-positive | Single-threaded tooling, not runtime. |
 | `rand()` in samples/examples/tests (rocprofiler-sdk samples, hip docs, rocprofiler-compute sample, ocltst, hip-tests, aqlprofile tests) | ~80 sites | false-positive | Example / single-threaded test data generation. |
@@ -399,7 +399,9 @@ SSL verification is **enabled by default** and only disabled when the user sets 
 - `projects/rocdecode/src/rocdecode/vaapi/vaapi_videodecoder.cpp:1012,1015` — [`.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md`](.analysis/anomalies/rocdecode-getvisibledevices-strtok-getenv-bug.md)
 - `projects/rocjpeg/src/rocjpeg_vaapi_decoder.cpp:937,940` — [`.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md`](.analysis/anomalies/rocjpeg-getvisibledevices-strtok-getenv-bug.md)
 
-Both sites call `std::strtok` directly on the pointer returned by `std::getenv("ROCR_VISIBLE_DEVICES")` / `HIP_VISIBLE_DEVICES`. `strtok` modifies its input in place, which is undefined behaviour per C11 §7.22.4.6 when applied to the `getenv` return — it corrupts the environment variable string for subsequent reads in the process. Fix: `strdup` + `strtok_r` + `free`, or `std::string`+`std::stringstream`. A single PR should cover both sites (copy-paste bug).
+Both sites call `std::strtok` directly on the pointer returned by `std::getenv("ROCR_VISIBLE_DEVICES")` / `HIP_VISIBLE_DEVICES`. `strtok` modifies its input in place, which is undefined behaviour per C11 §7.22.4.6 when applied to the `getenv` return — it corrupts the environment variable string for subsequent reads in the process. Additionally, the user-controlled env-var values were passed to `std::atoi` with no input validation.
+
+**Fix PR: [ROCm/rocm-systems#5010](https://github.com/ROCm/rocm-systems/pull/5010)** — replaces both sites with a hardened single-pass `ParseVisibleDevicesCsv()` helper that validates charset (`[0-9,]` only), enforces length/digit/range caps, and never mutates the source buffer. Includes 9 unit tests per sub-project covering regression, input sanitisation, scale (up to 1024 GPUs), and attacker-oriented inputs (control chars, UTF-8 payloads, NUL truncation).
 
 ### Incidental triage-engine fix (this pass)
 
@@ -430,38 +432,35 @@ if (env) {
 
 ## Issue #10: strncat Buffer Overflow in hip-tests — [Full Analysis](analysis-reports/critical/10-strncat-overflow.md)
 
-**Severity**: MEDIUM-HIGH
+**Severity**: ~~MEDIUM-HIGH~~ → NEGLIGIBLE (downgraded after detailed review)
 **Files**: `projects/hip-tests/catch/unit/device/hipDeviceGetUuid.cc:150,240`, `getUUIDfrmRocinfo_Exe.cc:30`
-**Tools**: flawfinder (level 5) | Code review confirmed
-**Exploitability**: LOW — test code, but pattern may be copied
+**Tools**: flawfinder (level 5)
+**Status**: 🔵 Triaged — no fix needed ([`.analysis/anomalies.toml`](.analysis/anomalies.toml))
 
-### The Bug
+### The Finding
 
 ```cpp
-char command[COMMAND_LEN];
+char command[COMMAND_LEN];   // COMMAND_LEN = 256
 // ... command partially filled ...
-strncat(command, " | grep -i Uuid:", COMMAND_LEN);  // WRONG
+strncat(command, " | grep -i Uuid:", COMMAND_LEN);  // 3rd arg is total buffer size
 ```
 
-`strncat`'s third argument should be the **remaining space** in the buffer, not the total buffer size. If `command` already contains data, this writes past the end of the buffer.
+`strncat`'s third argument should be the **remaining space** in the buffer, not the total buffer size. Flawfinder correctly flags this as a misuse of the `strncat` API (CWE-120).
 
-The correct form:
-```cpp
-strncat(command, " | grep -i Uuid:", COMMAND_LEN - strlen(command) - 1);
-// Or better: snprintf
-```
+### Why No Fix Is Needed
 
-### Impact
-- Stack buffer overflow in test executable
-- Test code patterns get copied into production code
-- CWE-120: Buffer Copy without Checking Size of Input
+Detailed review ([full analysis](analysis-reports/critical/10-strncat-overflow.md)) shows the overflow **cannot be triggered**:
 
-### Fix
-Replace `strncat` with `snprintf`:
-```cpp
-snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
-         " | grep -i Uuid:");
-```
+- Buffer is 256 bytes. Content after both writes is `"rocminfo | grep -i Uuid:"` — 25 chars total.
+- Both input strings are hardcoded literals; no user-controlled input reaches the buffer.
+- All 3 sites are in **test infrastructure only** (`hipDeviceGetUuid.cc` Catch2 tests + `getUUIDfrmRocinfo_Exe.cc` helper executable). This code never ships as part of the ROCm runtime.
+- Even if `rocmInfo` were a long path like `/opt/rocm-6.0.0/bin/rocminfo` (30 chars), total would be 47 chars — well within 256.
+
+The `strncat` API misuse is technically incorrect but has no practical impact. Filing a PR for this would be purely cosmetic — the trivial fix (`snprintf(command, COMMAND_LEN, "%s | grep -i Uuid:", rocmInfo)`) is a one-liner but adds no safety to code that is already safe by construction.
+
+### Decision
+
+No PR filed. Added to [`.analysis/anomalies.toml`](.analysis/anomalies.toml) as `wont-fix`.
 
 ---
 
@@ -478,8 +477,8 @@ snprintf(command + strlen(command), COMMAND_LEN - strlen(command),
 | 6b | Unchecked HIP returns (hip-tests) | MEDIUM | Correctness | ~3,700 test-code findings, un-triaged | TBD | 📋 Deferred — see §6 |
 | 7 | HIP double-free | HIGH | Correctness | 0 real / 14 unique (24 raw), all in hip-tests | Triaged | 🔵 Triaged — [`.analysis/anomalies.toml`](.analysis/anomalies.toml) |
 | 8 | SSL verify=False | MEDIUM | Security | 2 opt-in sites in rocinsight (B501 false-positive + opt-out had no runtime warning) | 2 hours | 🟢 [#4984](https://github.com/ROCm/rocm-systems/pull/4984) |
-| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 277 locations → 2 confirmed bugs | 8 hours | 🔵 Triaged (fix pending) |
-| 10 | strncat overflow | MEDIUM-HIGH | Security | hip-tests (3 locations) | 1 hour | ⚪ Open |
+| 9 | Thread-unsafe functions | MEDIUM-HIGH | Correctness | 277 locations → 2 confirmed bugs | 8 hours | 🟢 [#5010](https://github.com/ROCm/rocm-systems/pull/5010) |
+| 10 | strncat overflow | NEGLIGIBLE | Code quality | hip-tests (3 locations) | — | 🔵 Triaged — wont-fix ([`.analysis/anomalies.toml`](.analysis/anomalies.toml)) |
 
 **Estimated total effort**: ~47 hours for all 10 issues.
 **Issues 1, 2, 8**: Can be fixed in a single afternoon — highest ROI.
