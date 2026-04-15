@@ -6,7 +6,9 @@
 
 **Tool**: cppcheck flagged `alloca` as obsolete; manual review of each call site for sizeof mismatches, unbounded sizes, and other bugs.
 
-**Fixed**: `signal.cpp:243` sizeof mismatch — PR https://github.com/ROCm/rocm-systems/pull/5052
+**Fixed**:
+- `signal.cpp:243` sizeof mismatch — PR https://github.com/ROCm/rocm-systems/pull/5052
+- `amd_hsa_code.cpp:530` wrong sizeof in AddNoteIsa() — PR https://github.com/ROCm/rocm-systems/pull/5059
 
 ## Summary
 
@@ -22,7 +24,7 @@
 | 8 | `runtime.cpp` | 1639 | `MemoryImport` | RISK |
 | 9 | `hsa_ext_amd.cpp` | 1310 | `hsa_amd_ipc_memory_attach()` | RISK |
 | 10 | `os_win.cpp` | 184 | `GetEnvVar()` | RISK |
-| 11 | `amd_hsa_code.cpp` | 530 | `AddNoteIsa()` | RISK |
+| 11 | `amd_hsa_code.cpp` | 530 | `AddNoteIsa()` | **BUG** — PR [#5059](https://github.com/ROCm/rocm-systems/pull/5059) |
 | 12 | `amd_hsa_code.cpp` | 816 | `AddNoteProducer()` | RISK |
 | 13 | `amd_hsa_code.cpp` | 838 | `AddNoteProducerOptions()` | RISK |
 | 14 | `amd_hsa_code.cpp` | 1403 | `PrintRawData()` | RISK |
@@ -217,7 +219,9 @@ desc->vendor_name_size = vendor_name.length()+1;
 desc->architecture_name_size = architecture_name.length()+1;
 ```
 
-**Assessment: RISK** — String lengths come from ELF note data. No overflow check on the size calculation (`length() + length() + 1` could wrap on 32-bit). A crafted code object with very long vendor/architecture names would overflow the stack. Windows path only (`_alloca`).
+**Assessment: BUG (fixed)** — Used `sizeof(amdgpu_hsa_note_producer_t)` (16 bytes) instead of `sizeof(amdgpu_hsa_note_isa_t)` (20 bytes), under-allocating by 4 bytes. Subsequent `memset` and `memcpy` write past the buffer. Likely copy-paste error from `AddNoteProducer()`. Present since original 2016 import. No callers found in repo (possible dead code, but public API method). Fixed in PR [#5059](https://github.com/ROCm/rocm-systems/pull/5059).
+
+Additional risk: string lengths come from ELF note data with no overflow check on the size calculation.
 
 ---
 
@@ -232,7 +236,7 @@ memset(desc, 0, size);
 memcpy(desc->producer_name, producer.c_str(), producer.length() + 1);
 ```
 
-**Assessment: RISK** — `producer.length()` from ELF data. Same pattern as #11. Also note: `memcpy` copies `length() + 1` bytes but `size` only allocates `sizeof(...) + length()` — this is an **off-by-one buffer overflow** (the null terminator writes one byte past the allocation).
+**Assessment: RISK** — `producer.length()` from ELF data. No overflow check on size. Note: the apparent off-by-one (`memcpy` copies `length() + 1` but `size` only adds `length()`) is actually correct — `sizeof(amdgpu_hsa_note_producer_t)` includes 1 byte from the `char producer_name[1]` flexible array member, which accounts for the null terminator.
 
 ---
 
@@ -248,7 +252,7 @@ desc->producer_options_size = options.length();
 memcpy(desc->producer_options, options.c_str(), options.length() + 1);
 ```
 
-**Assessment: RISK** — Same pattern as #12. Same **off-by-one buffer overflow**: allocates `sizeof(...) + length()` but `memcpy` copies `length() + 1` bytes (including the null terminator).
+**Assessment: RISK** — Same pattern as #12. The apparent off-by-one (`memcpy` copies `length() + 1` but `size` only adds `length()`) is actually correct — `sizeof(amdgpu_hsa_note_producer_options_t)` includes 1 byte from the `char producer_options[1]` flexible array member.
 
 ---
 
