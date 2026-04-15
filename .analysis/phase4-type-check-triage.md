@@ -7,7 +7,8 @@
 
 ## Results
 
-**Real bugs: 2** (both in rocdecode utils — always-true `||` conditions)
+**Real bugs: 2** (both in rocdecode utils — missing `==` in `||` conditions)
+**PRs filed**: #5063 (bug 1 — roc_video_dec.cpp), #5064 (bug 2 — ffmpeg_video_dec.cpp)
 **Low risk: 7**
 **False positives: 117**
 
@@ -15,33 +16,37 @@
 
 ## REAL BUGS
 
-### Bug 1: `roc_video_dec.cpp:308` — always-true chroma format check
+### Bug 1: `roc_video_dec.cpp:308` — always-false chroma format check (PR #5063)
 
 ```cpp
 if (video_chroma_format_ == rocDecVideoChromaFormat_420 || rocDecVideoChromaFormat_Monochrome)
 ```
 
-`rocDecVideoChromaFormat_Monochrome` is a bare enum value (non-zero integer), not a comparison. The `||` evaluates to `(comparison) || (non-zero)` which is **always true**. Every chroma format is silently mapped to NV12/P016, and the `else if` branches for YUV444 and YUV422 surface formats are **dead code** on the initial decoder creation path.
+`rocDecVideoChromaFormat_Monochrome` is enum value **0**, not a comparison. The `||` evaluates to `(comparison) || (0)` which makes the Monochrome term **always false** — the condition reduces to just `video_chroma_format_ == rocDecVideoChromaFormat_420`. Monochrome video silently falls through to the 4:4:4 or 4:2:2 path, producing the wrong surface format.
 
 **Correct form** (already present at line 553 in the reconfigure path):
 ```cpp
 if (video_chroma_format_ == rocDecVideoChromaFormat_420 || video_chroma_format_ == rocDecVideoChromaFormat_Monochrome)
 ```
 
-**Impact**: 4:4:4 and 4:2:2 video content gets decoded to NV12/P016 instead of the appropriate surface format on first decode. The fallback logic at line 316 may mitigate this by checking `decode_caps.output_format_mask`, but the intent is clearly to match the surface format to the chroma format.
+**Impact**: Monochrome video (e.g. grayscale HEVC) gets the wrong output surface format in `HandleVideoSequence()`, potentially causing incorrect decode output or downstream failures.
 
-### Bug 2: `ffmpeg_video_dec.cpp:361` — always-true codec check
+**Introduced in**: `db6dbf7076` _"Rr/roc video decode class (#20)"_ (2023-10-23) by Rajy Rawther.
+
+### Bug 2: `ffmpeg_video_dec.cpp:361` — always-true codec check (PR #5064)
 
 ```cpp
 if (codec_id_ == rocDecVideoCodec_AVC || rocDecVideoCodec_HEVC)
 ```
 
-Same pattern. `rocDecVideoCodec_HEVC` is non-zero, so the condition is always true. The AV1 branch at line 373 (`if (codec_id_ == rocDecVideoCodec_AV1)`) is **unreachable** when `fp_sei_` is open — AV1 SEI messages are never written to the output file. The `sei_buffer` pointer is still advanced correctly (line 376), so no memory corruption, but AV1 SEI data is silently dropped.
+Same pattern. `rocDecVideoCodec_HEVC` is enum value **4** (non-zero), so the condition is always true. Every codec enters the AVC/HEVC SEI path, and AV1 streams get SEI data double-written (once via the always-true path, once via the AV1 check at line 373). The `sei_buffer` pointer is still advanced correctly (line 376), so no memory corruption.
 
 **Correct form**:
 ```cpp
 if (codec_id_ == rocDecVideoCodec_AVC || codec_id_ == rocDecVideoCodec_HEVC)
 ```
+
+**Introduced in**: `fb82691ef2` _"ffmpeg software decoder implementation (#461)"_ (2024-12-04) by Rajy Rawther.
 
 ---
 
@@ -75,6 +80,11 @@ All are false positives — type fields are only used in debug printf or as plai
 
 ## Conclusion
 
-The `type-check-no-else` rule (the broadest WARNING-level rule) found **2 real bugs** — but not through its intended detection mechanism (missing else for discriminator values). Instead, it flagged lines where a missing `==` operator created always-true conditions. This is a known C/C++ pitfall: `if (x == A || B)` instead of `if (x == A || x == B)`.
+The `type-check-no-else` rule (the broadest WARNING-level rule) found **2 real bugs** — but not through its intended detection mechanism (missing else for discriminator values). Instead, it flagged lines where a missing `==` operator created always-true or always-false conditions depending on the enum's integer value. This is a known C/C++ pitfall: `if (x == A || B)` instead of `if (x == A || x == B)`.
+
+- Bug 1: `Monochrome = 0` → `|| 0` is always **false** (Monochrome silently unhandled)
+- Bug 2: `HEVC = 4` → `|| 4` is always **true** (all codecs enter AVC/HEVC path)
 
 These bugs are better detected by `-Wint-in-bool-context` (GCC) or `-Wconstant-logical-operand` (Clang). The semgrep rule caught them incidentally.
+
+**PRs**: #5063, #5064
