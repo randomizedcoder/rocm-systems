@@ -370,7 +370,7 @@ class AMDSMIParser(argparse.ArgumentParser):
                 option_string: Optional[str] = None,
             ) -> None:
                 # valid values
-                valid_clk_types = ("sclk", "mclk")
+                valid_clk_types = ("sclk", "mclk", "fclk")
                 valid_lim_types = ("min", "max")
                 clk_type, lim_type, val = values
 
@@ -1493,7 +1493,7 @@ class AMDSMIParser(argparse.ArgumentParser):
                             \nIn virtualization environments, it can also list VFs associated to each\
                             \nGPU with some basic information for each VF."
         enumeration_help = "Enumeration mapping to other features.\
-                            \n    Includes CARD, RENDER, HSA_ID, HIP_ID, and HIP_UUID."
+                            \n    Includes CARD, RENDER, HSA_ID, HIP_ID, HIP_UUID, and OAM_ID"
 
         # Create list subparser
         list_parser = subparsers.add_parser(
@@ -1504,7 +1504,7 @@ class AMDSMIParser(argparse.ArgumentParser):
         list_parser.set_defaults(func=func)
 
         # Create -e subparser
-        list_parser.add_argument("-e", action="store_true", help=enumeration_help)
+        list_parser.add_argument("-e", "--enumeration", action="store_true", help=enumeration_help)
 
         # Add Universal Arguments
         self._add_device_arguments(list_parser, required=False)
@@ -2430,7 +2430,7 @@ class AMDSMIParser(argparse.ArgumentParser):
                 self.helpers.get_power_caps()
             )
             set_power_cap_help = f"Set either PPT0 or PPT1 power capacity limit:\n\tEx: `amd-smi set -o 1300 ppt0`\n\tPPT0 min cap: {ppt0_power_cap_min}, PPT0 max cap: {ppt0_power_cap_max}\n\tPPT1 min cap: {ppt1_power_cap_min}, PPT1 max cap: {ppt1_power_cap_max}"
-            set_clk_limit_help = "Sets the sclk (aka gfxclk) or mclk minimum and maximum frequencies. \n\tex: amd-smi set -L (sclk | mclk) (min | max) value"
+            set_clk_limit_help = "Sets the sclk (aka gfxclk), mclk, or fclk minimum and maximum frequencies. \n\tex: amd-smi set -L (sclk | mclk | fclk) (min | max) value"
             set_process_isolation_help = "Enable or disable the GPU process isolation on a per partition basis:\n    0 for disable and 1 for enable.\n"
 
         # Help text for CPU set options

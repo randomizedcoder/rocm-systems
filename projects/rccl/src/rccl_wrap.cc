@@ -370,12 +370,6 @@ ncclResult_t rcclGetAlgoName(int algo, const char** algoName) {
       case rcclAddonAlgos_t::RCCL_DIRECT_ALLGATHER:
         *algoName = "Direct";
         break;
-      case rcclAddonAlgos_t::RCCL_MSCCL:
-        *algoName = "MSCCL";
-        break;
-      case rcclAddonAlgos_t::RCCL_MSCCLPP:
-        *algoName = "MSCCLPP";
-        break;
 #ifdef ENABLE_WARP_SPEED
       case rcclAddonAlgos_t::RCCL_WARP_SPEED:
         *algoName = "RING*"; // WarpSpeed (*) uses RING algorithm
@@ -421,6 +415,12 @@ bool rcclUseAllGatherDirect(struct ncclComm* comm, size_t& msgSize) {
 
   // Direct AllGather incompatible with UBR
   if (ncclParamLocalRegister()) {
+    return false;
+  }
+
+  // Multi-node Direct AllGather requires PXN
+  if (comm->nNodes > 1 && ncclPxnDisable(comm) != 0) {
+    INFO(NCCL_INIT, "RCCL DIRECT ALLGATHER disabled on multi-node due to PXN being disabled.");
     return false;
   }
 
@@ -569,7 +569,7 @@ void rcclSetWarpSpeedCUs(struct ncclComm* comm, int algo, int threadsPerBlock, i
 }
 
 bool rcclWarpSpeedSupported(struct ncclComm* comm, struct ncclKernelPlan* plan) {
-  if (!comm->topo->warpSpeedEnabled) {
+  if (!comm->topo->warpSpeedEnabled || plan->isSymColl) {
     return false;
   }
 
