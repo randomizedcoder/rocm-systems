@@ -38,6 +38,10 @@ pkgs.mkShell {
     yamllint
     gersemi           # CMake formatting/linting
 
+    # Fuzzing (libFuzzer harnesses: .#fuzz / .#fuzz-run)
+    clang             # clang++ with -fsanitize=fuzzer
+    llvm              # llvm-symbolizer for crash backtraces
+
     # Build tools (for compile_commands.json generation)
     cmake
     gcc
@@ -56,7 +60,12 @@ pkgs.mkShell {
     echo "Available analysis commands:"
     echo "  nix build .#analysis-quick       Quick checks (~2-5 min)"
     echo "  nix build .#analysis-standard    Standard checks (~10-20 min)"
-    echo "  nix build .#analysis-deep        Full analysis (~30-60 min)"
+    echo "  nix build .#analysis-deep        Full analysis + fuzzing (~30-60 min)"
+    echo ""
+    echo "Fuzzing (libFuzzer):"
+    echo "  nix build .#fuzz                 Build harnesses + corpora"
+    echo "  nix build .#fuzz-run             Bounded run, collect crashes"
+    echo "  FUZZ_TIME=300 ./result/bin/run-fuzzers   (after .#fuzz)"
     echo ""
     echo "Individual tools:"
     echo "  nix build .#analysis-flawfinder"

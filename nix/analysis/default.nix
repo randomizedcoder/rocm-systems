@@ -54,6 +54,10 @@ let
   yamllint = import ./tools/yamllint.nix { inherit pkgs lib src analysisLib; };
   cmake-lint = import ./tools/cmake-lint.nix { inherit pkgs lib src analysisLib; };
 
+  # Fuzzing (libFuzzer). Exposed as .#fuzz / .#fuzz-run, not analysis-<tool>,
+  # since it builds+runs harnesses rather than linting the source tree.
+  fuzzModule = import ./tools/fuzz.nix { inherit pkgs lib src analysisLib; };
+
   # All individual tools as an attrset
   tools = {
     inherit
@@ -68,7 +72,11 @@ let
 
   # ── Composite targets ──────────────────────────────────────────
 
-  composites = import ./composites.nix { inherit pkgs lib tools; };
+  composites = import ./composites.nix {
+    inherit pkgs lib tools;
+    # fuzz-run joins the deep/all tiers so a full sweep also fuzzes.
+    extras = { "fuzz-run" = fuzzModule.fuzz-run; };
+  };
 
   # ── Per-project targets ────────────────────────────────────────
   #
@@ -116,4 +124,10 @@ lib.mapAttrs' (name: value: {
 # Compile database (useful for debugging)
 // {
   "analysis-compile-db" = compileDb;
+}
+
+# Fuzzing targets (build harnesses; run harnesses)
+// {
+  "fuzz" = fuzzModule.fuzz;
+  "fuzz-run" = fuzzModule.fuzz-run;
 }

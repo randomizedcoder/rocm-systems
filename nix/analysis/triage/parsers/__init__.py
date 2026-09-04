@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from finding import Finding
-from parsers import cppcheck, semgrep, clang, flawfinder, generic
+from parsers import cppcheck, semgrep, clang, flawfinder, generic, fuzz
 
 
 def load_all_findings(result_dir: str) -> list[Finding]:
@@ -101,5 +101,9 @@ def load_all_findings(result_dir: str) -> list[Finding]:
     p = rd / 'cmake-lint' / 'report.txt'
     if p.exists():
         findings.extend(generic.parse(str(p), 'cmake-lint'))
+
+    # libFuzzer crash artifacts (fuzz-run/crashes/<harness>/); empty on a
+    # clean run, so this is a no-op unless a harness actually crashed.
+    findings.extend(fuzz.parse(result_dir))
 
     return findings

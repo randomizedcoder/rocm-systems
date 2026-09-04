@@ -2,24 +2,26 @@
 #
 # Each tier includes progressively more tools, trading speed for coverage.
 #
-{ pkgs, lib, tools }:
+{ pkgs, lib, tools, extras ? { } }:
 
 let
   # All tool names — used by deep and all targets
   allTools = lib.attrNames tools;
 
-  # Helper to create a composite target that links to tool outputs
-  # and prints a summary.
-  mkComposite = name: description: toolSet:
+  # Helper to create a composite target that links to a set of report
+  # derivations (an attrset of name -> derivation) and prints a summary.
+  mkComposite = name: description: drvs:
     pkgs.runCommand "analysis-${name}" { } (
       let
+        drvNames = lib.attrNames drvs;
+
         linkCommands = lib.concatMapStringsSep "\n" (t:
-          "ln -s ${tools.${t}} $out/${t}"
-        ) toolSet;
+          "ln -s ${drvs.${t}} $out/${t}"
+        ) drvNames;
 
         summaryLines = lib.concatMapStringsSep "\n" (t:
-          ''echo "${t}: $(cat ${tools.${t}}/count.txt 2>/dev/null || echo 'N/A') findings"''
-        ) toolSet;
+          ''echo "${t}: $(cat ${drvs.${t}}/count.txt 2>/dev/null || echo 'N/A') findings"''
+        ) drvNames;
       in
       ''
         mkdir -p $out
@@ -39,12 +41,15 @@ let
       ''
     );
 
+  # Select a subset of tools by name into a name -> derivation attrset.
+  pick = names: lib.getAttrs names tools;
+
 in
 {
   # Quick: source-only tools, no compilation needed (~2-5 min)
   quick = mkComposite "quick"
     "Fast checks for pre-commit and immediate feedback."
-    [
+    (pick [
       "flawfinder"
       "cpplint"
       "ruff"
@@ -52,12 +57,12 @@ in
       "yamllint"
       "cmake-lint"
       "fortran-lint"
-    ];
+    ]);
 
   # Standard: quick + compile-db tools (~10-20 min)
   standard = mkComposite "standard"
     "Comprehensive analysis balanced with runtime."
-    [
+    (pick [
       # Quick tools
       "flawfinder"
       "cpplint"
@@ -74,15 +79,15 @@ in
       "pylint"
       # Rust
       "clippy"
-    ];
+    ]);
 
-  # Deep: all tools (~30-60 min)
+  # Deep: all tools + fuzzing (~30-60 min)
   deep = mkComposite "deep"
-    "Exhaustive analysis including interprocedural and pattern-based tools."
-    allTools;
+    "Exhaustive analysis including interprocedural, pattern-based, and fuzz tools."
+    (tools // extras);
 
-  # All: explicit alias for deep — every tool, no exceptions
+  # All: explicit alias for deep — every tool plus fuzzing, no exceptions
   all = mkComposite "all"
-    "Every analysis tool (${toString (lib.length allTools)} tools). Same as deep."
-    allTools;
+    "Every analysis tool (${toString (lib.length allTools)} tools) plus fuzzing."
+    (tools // extras);
 }
