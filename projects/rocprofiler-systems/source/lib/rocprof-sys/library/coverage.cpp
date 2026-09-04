@@ -3,9 +3,11 @@
 
 #include "library/coverage.hpp"
 #include "api.hpp"
+#include "common/env_vars.hpp"
 #include "core/config.hpp"
 #include "library/coverage/impl.hpp"
 #include "library/thread_data.hpp"
+#include <cstdint>
 
 #include <timemory/backends/threading.hpp>
 #include <timemory/tpls/cereal/cereal.hpp>
@@ -67,7 +69,7 @@ get_coverage_data()
 }
 //
 auto&
-get_coverage_count(int64_t _tid = tim::threading::get_id())
+get_coverage_count(std::int64_t _tid = tim::threading::get_id())
 {
     return coverage_thread_data::instance(construct_on_thread{ _tid });
 }
@@ -195,7 +197,7 @@ post_process()
 
     auto _get_setting = [](const std::string& _v) {
         auto&& _b = config::get_setting_value<bool>(_v);
-        if(!_b && get_is_continuous_integration())
+        if(!_b)
         {
             throw std::runtime_error(
                 fmt::format("Error! No configuration setting named '{}'", _v));
@@ -203,8 +205,8 @@ post_process()
         return _b.value_or(true);
     };
 
-    auto _text_output = _get_setting("ROCPROFSYS_TEXT_OUTPUT");
-    auto _json_output = _get_setting("ROCPROFSYS_JSON_OUTPUT");
+    auto _text_output = _get_setting(std::string{ env_vars::TEXT_OUTPUT });
+    auto _json_output = _get_setting(std::string{ env_vars::JSON_OUTPUT });
 
     if(_text_output)
     {
@@ -310,10 +312,10 @@ extern "C" void
 rocprofsys_register_coverage_hidden(const char* file, const char* func, size_t address)
 {
     if(coverage::get_post_processed()) return;
-    if(rocprofsys::get_state() < rocprofsys::State::Active &&
+    if(rocprofsys::state::process::get() < rocprofsys::state::process::Active &&
        !rocprofsys_init_tooling_hidden())
         return;
-    else if(rocprofsys::get_state() >= rocprofsys::State::Finalized)
+    else if(rocprofsys::state::process::get() >= rocprofsys::state::process::Finalized)
         return;
 
     (*coverage::get_coverage_count())[file][func][address] += 1;

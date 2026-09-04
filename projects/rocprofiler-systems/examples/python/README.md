@@ -2,11 +2,11 @@
 
 ## Overview
 
-This directory contains Python examples demonstrating rocprofiler-systems' Python profiling capabilities. The examples show different instrumentation approaches: the `@rocprofsys.profile()` decorator for automatic function tracing, `omni_user_region()` for manual named regions, `@noprofile` for excluding specific functions, and `rocprofsys.user.stop_trace()` for runtime tracing control. Workloads include recursive Fibonacci computation, nested loops, and optional NumPy array operations.
+This directory contains Python examples demonstrating rocprofiler-systems' Python profiling capabilities. The examples show different instrumentation approaches: the `@rocprofsys.profile()` decorator for automatic function tracing, ROCTx `RoctxRange` for manual named regions, `@noprofile` for excluding specific functions, and `roctx.profilerPause()` for runtime tracing control. Workloads include recursive Fibonacci computation, nested loops, and optional NumPy array operations.
 
 ## Source Files
 
-- `source.py` - Uses `@rocprofsys.profile()` decorator and `omni_user_region()` for manual region instrumentation with selective tracing control.
+- `source.py` - Uses the `@rocprofsys.profile()` decorator and the ROCTx `RoctxRange` context manager for manual region instrumentation with selective tracing control.
 - `source-numpy.py` - Same as `source.py` with additional NumPy random array operations (falls back to standard `random` if NumPy is unavailable).
 - `builtin.py` - Uses the built-in `@profile` decorator without rocprofiler-systems-specific integration.
 - `external.py` - No profiling decorators; intended for external instrumentation via `rocprof-sys-python`.
@@ -17,6 +17,7 @@ This directory contains Python examples demonstrating rocprofiler-systems' Pytho
 
 - Python 3
 - rocprofiler-systems Python module
+- ROCTx Python bindings (`roctx`, provided by `rocprofiler-sdk-roctx`) - required by `source.py` and `source-numpy.py`
 - (Optional) NumPy for `source-numpy.py`
 
 ## Running
@@ -40,7 +41,7 @@ rocprof-sys-python -- ./source-numpy.py -n 3 -v 20
 **Common arguments:**
 
 | Flag | Description | Default |
-|------|-------------|---------|
+| ------ | ------------- | --------- |
 | `-n, --num-iterations` | Number of iterations | 3 |
 | `-v, --value` | Starting Fibonacci value | 20 |
 | `-s, --stop-profile` | Stop tracing after N iterations (0 = never) | 0 |
@@ -54,7 +55,7 @@ rocprof-sys-python -- ./source.py -n 5 -v 20
 ### Recommended Configuration
 
 | Variable | Value | Purpose |
-|----------|-------|---------|
+| ---------- | ------- | --------- |
 | `ROCPROFSYS_TRACE` | `true` | Generate Perfetto trace with Python call stacks |
 | `ROCPROFSYS_PROFILE` | `true` | Generate call-stack profile |
 | `ROCPROFSYS_USE_SAMPLING` | `ON` | Enable statistical sampling |

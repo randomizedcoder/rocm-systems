@@ -29,7 +29,11 @@ namespace amd::roc {
 PrintfDbg::PrintfDbg(Device& device, FILE* file)
     : dbgBuffer_(nullptr), dbgBuffer_size_(0), dbgFile_(file), gpuDevice_(device) {}
 
-PrintfDbg::~PrintfDbg() { dev().hostFree(dbgBuffer_, dbgBuffer_size_); }
+PrintfDbg::~PrintfDbg() {
+  if (dbgBuffer_ != nullptr) {
+    dev().hostFree(dbgBuffer_, dbgBuffer_size_);
+  }
+}
 
 bool PrintfDbg::allocate(bool realloc) {
   if (nullptr == dbgBuffer_) {
@@ -84,9 +88,13 @@ int PrintfDbg::checkVectorSpecifier(const std::string& fmt, size_t startPos, siz
     else if (fmt[curPos - 4] == 'v') {
       size = 3;
     }
-    // the modifier is "hh"
+    // the modifier is "hh", or two-digit vector size (16) with "h" or "l"
     else if ((curPos >= 5) && (fmt[curPos - 5] == 'v')) {
       size = 4;
+    }
+    // two-digit vector size (16) with "hl" or "hh" modifier
+    else if ((curPos >= 6) && (fmt[curPos - 6] == 'v')) {
+      size = 5;
     }
     if (size > 0) {
       curPos = size;
@@ -187,14 +195,14 @@ size_t PrintfDbg::outputArgument(const std::string& fmt, bool printFloat, size_t
         } else {
           bool hhModifier = (strstr(fmt.c_str(), "hh") != nullptr);
           if (hhModifier) {
-            // current implementation of printf in gcc 4.5.2 runtime libraries,
-            // doesn`t recognize "hh" modifier ==>
-            // argument should be explicitly converted to  unsigned char (uchar)
-            // before printing and
-            // fmt should be updated not to contain "hh" modifier
             std::string hhFmt = fmt;
             hhFmt.erase(hhFmt.find_first_of("h"), 2);
-            amd::Os::printf(hhFmt.data(), *(reinterpret_cast<const unsigned char*>(argument)));
+            char specifier = fmt[fmt.size() - 1];
+            if (specifier == 'd' || specifier == 'i') {
+              amd::Os::printf(hhFmt.data(), *(reinterpret_cast<const signed char*>(argument)));
+            } else {
+              amd::Os::printf(hhFmt.data(), *(reinterpret_cast<const unsigned char*>(argument)));
+            }
           } else if (hlModifier) {
             amd::Os::printf(hlFmt.data(), size == 2
                                               ? *(reinterpret_cast<const uint16_t*>(argument))

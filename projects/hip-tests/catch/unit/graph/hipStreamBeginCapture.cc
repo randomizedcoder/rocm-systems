@@ -69,9 +69,11 @@ class eventQuery {
   hipError_t result_status = hipSuccess;
 };
 
+static size_t captureN() { return isQuickLevel() ? 10000 : 1000000; }
+
 template <typename T, typename F>
 void captureStreamAndLaunchGraph(F graphFunc, hipStreamCaptureMode mode, hipStream_t stream) {
-  constexpr size_t N = 1000000;
+  const size_t N = captureN();
   size_t Nbytes = N * sizeof(T);
 
   hipGraph_t graph{nullptr};
@@ -311,7 +313,7 @@ static void colligatedStrmCapture(const hipStream_t& stream1, const hipStream_t&
 /* Local function for colligated stream capture functionality
  */
 static void colligatedStrmCaptureFunc(const hipStream_t& stream1, const hipStream_t& stream2) {
-  constexpr size_t N = 1000000;
+  const size_t N = captureN();
   size_t Nbytes = N * sizeof(int);
 
   hipGraph_t graph1{nullptr}, graph2{nullptr};
@@ -370,16 +372,16 @@ static void colligatedStrmCaptureFunc(const hipStream_t& stream1, const hipStrea
 static void threadStrmCaptureFunc(hipStream_t stream, int* A_h, int* A_d, int* B_h, int* B_d,
                                   hipGraph_t* graph, size_t N, hipStreamCaptureMode mode) {
   // Capture stream
-  HIP_CHECK(hipStreamBeginCapture(stream, mode));
-  captureSequenceLinear(A_h, A_d, B_h, B_d, N, stream);
-  captureSequenceCompute(A_d, B_h, B_d, N, stream);
-  HIP_CHECK(hipStreamEndCapture(stream, graph));
+  HIP_CHECK_THREAD(hipStreamBeginCapture(stream, mode));
+  captureSequenceLinear(A_h, A_d, B_h, B_d, N, stream, true);
+  captureSequenceCompute(A_d, B_h, B_d, N, stream, true);
+  HIP_CHECK_THREAD(hipStreamEndCapture(stream, graph));
 }
 
 /* Local Function for multithreaded tests
  */
 static void multithreadedTest(hipStreamCaptureMode mode) {
-  constexpr size_t N = 1000000;
+  const size_t N = captureN();
   size_t Nbytes = N * sizeof(int);
 
   hipGraph_t graph1{nullptr}, graph2{nullptr};
@@ -406,6 +408,7 @@ static void multithreadedTest(hipStreamCaptureMode mode) {
                  D_d.ptr(), &graph2, N, mode);
   t1.join();
   t2.join();
+  HIP_CHECK_THREAD_FINALIZE();
 
   // Create Executable Graphs
   HIP_CHECK(hipGraphInstantiate(&graphExec1, graph1, nullptr, nullptr, 0));
@@ -1056,8 +1059,7 @@ HIP_TEST_CASE(Unit_hipStreamBeginCapture_Positive_MultiGPU) {
   HIP_CHECK(hipGetDeviceCount(&devcount));
   // If only single GPU is detected then return
   if (devcount < 2) {
-    HipTest::HIP_SKIP_TEST(HipTest::SkipReason::kFewerThanTwoGpus);
-    return;
+    HIP_SKIP_TEST(HipTest::SkipReason::kFewerThanTwoGpus);
   }
   hipStream_t* stream = reinterpret_cast<hipStream_t*>(malloc(devcount * sizeof(hipStream_t)));
   REQUIRE(stream != nullptr);
@@ -1256,6 +1258,8 @@ HIP_TEST_CASE(Unit_hipStreamBeginCapture_Positive_streamReuse) {
   for (int i = 0; i < 3; i++) {
     hipGraphExec_t graphExec{nullptr};
     HIP_CHECK(hipMemset(devMem[i], 0, sizeof(int)));
+    // hipMemset to device memory can be asynchronous; keep the reset ordered before graph launch.
+    HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(hipGraphInstantiate(&graphExec, graphs[i], nullptr, nullptr, 0));
     HIP_CHECK(hipGraphLaunch(graphExec, streams[i]));
     HIP_CHECK(hipStreamSynchronize(streams[i]));
@@ -1505,8 +1509,8 @@ HIP_TEST_CASE(Unit_hipStreamBeginCapture_StreamSync_OngoingCapture) {
 // Local function executed as thread
 static void strmSyncThread(int* Ah, int* Ad, int* Bh, int* Bd, int BLOCKSIZE, hipError_t* error) {
   StreamsGuard stream(1);
-  HIP_CHECK(hipMemcpyAsync(Ad, Ah, BLOCKSIZE * sizeof(int), hipMemcpyDefault, stream[0]));
-  HIP_CHECK(hipMemcpyAsync(Bd, Bh, BLOCKSIZE * sizeof(int), hipMemcpyDefault, stream[0]));
+  HIP_CHECK_THREAD(hipMemcpyAsync(Ad, Ah, BLOCKSIZE * sizeof(int), hipMemcpyDefault, stream[0]));
+  HIP_CHECK_THREAD(hipMemcpyAsync(Bd, Bh, BLOCKSIZE * sizeof(int), hipMemcpyDefault, stream[0]));
   *error = hipStreamSynchronize(stream[0]);
 }
 
@@ -1518,6 +1522,7 @@ static void captureStrmThread(hipGraph_t* graph, int* Ah, int* Ad, int* Bh, int*
   HIP_CHECK(hipStreamBeginCapture(stream[0], flag));
   std::thread t1(strmSyncThread, Ah, Ad, Bh, Bd, BLOCKSIZE, error);
   t1.join();
+  HIP_CHECK_THREAD_FINALIZE();
   myadd<<<GRIDSIZE, BLOCKSIZE, 0, stream[0]>>>(Ad, Bd);
   if (flag == hipStreamCaptureModeGlobal) {
     HIP_CHECK_ERROR(hipStreamEndCapture(stream[0], graph),

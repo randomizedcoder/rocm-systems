@@ -117,7 +117,7 @@ Settings::Settings() {
                                                           : HIP_FORCE_DEV_KERNARG;
 
   limit_blit_wg_ = 16;
-  DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING = 0;  // disable graph performance optimizations for PAL
+  // PAL now uses GraphExecClassic which has no segment scheduling — flag is irrelevant.
 }
 
 bool Settings::create(const Pal::DeviceProperties& palProp,
@@ -217,7 +217,9 @@ bool Settings::create(const Pal::DeviceProperties& palProp,
         supportDepthsRGB_ = true;
       }
       if (use64BitPtr_) {
-        maxAllocSize_ = 64ULL * Gi;
+        // Unified memory APUs address the carve-out and the aperture as one pool, which
+        // already exceeds 64 GiB on shipping parts.
+        maxAllocSize_ = 256ULL * Gi;
       } else {
         maxAllocSize_ = 3ULL * Gi;
       }

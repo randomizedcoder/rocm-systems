@@ -67,6 +67,8 @@ extern "C" {
  * @defgroup batch Batch API
  *
  * @defgroup async Async API
+ *
+ * @defgroup sync Synchronous I/O API
  */
 
 // ***********************************************************************
@@ -82,7 +84,7 @@ extern "C" {
  * @brief hipFile minor version number
  * @ingroup core
  */
-#define HIPFILE_VERSION_MINOR 2
+#define HIPFILE_VERSION_MINOR 5
 /*!
  * @brief hipFile patch version number
  * @ingroup core
@@ -95,7 +97,7 @@ extern "C" {
 
 /*!
  * @brief Platform-independent offset type
- * @ingroup core
+ * @ingroup sync
  */
 #ifdef _WIN32
 typedef __int64 hoff_t;
@@ -335,9 +337,8 @@ typedef struct hipFileDriverProps {
         unsigned minor_version; //!< Minor version of the GPU IO driver
 
         uint64_t poll_thresh_size;   //!< Maximum IO size (in KiB) for which polling is used when poll mode is
-                                     //!< enabled. Must be a multiple of 4K on NVIDIA.
-        uint64_t max_direct_io_size; //!< Maximum IO size (in KiB) used by the GPU IO driver. Must be a
-                                     //!< multiple of 64K on NVIDIA.
+                                     //!< enabled
+        uint64_t max_direct_io_size; //!< Maximum IO size (in KiB) used by the GPU IO driver
 
         unsigned driver_status_flags;  //!< Bitfield that maps to hipFileDriverStatusFlags_t
         unsigned driver_control_flags; //!< Bitfield that maps to hipFileDriverControlFlags_t
@@ -346,11 +347,9 @@ typedef struct hipFileDriverProps {
     unsigned feature_flags; //!< Bitfield that maps to hipFileFeatureFlags_t
 
     uint64_t max_device_cache_size; //!< Maximum amount of GPU memory (in KiB) that can be used for bounce
-                                    //!< buffers. Must be a multiple of 4K on NVIDIA.
-    uint64_t per_buffer_cache_size; //!< Amount of GPU memory (in KiB) allocated for each bounce buffer.
-                                    //!< Must be a multiple of 4K on NVIDIA.
-    uint64_t max_device_pinned_mem_size; //!< Maximum amount of GPU memory (in KiB) that can be pinned.
-                                         //!< Must be a multiple of 4K on NVIDIA.
+                                    //!< buffers
+    uint64_t per_buffer_cache_size; //!< Amount of GPU memory (in KiB) allocated for each bounce buffer
+    uint64_t max_device_pinned_mem_size; //!< Maximum amount of GPU memory (in KiB) that can be pinned
 
     unsigned max_batch_io_count;         //!< Maximum number of batch operations that can be submitted at once
     unsigned max_batch_io_timeout_msecs; //!< Timeout (in msec) for a batch operation to complete
@@ -506,7 +505,7 @@ hipFileError_t hipFileBufDeregister(const void *buffer_base);
 
 /*!
  * @brief Synchronously read data from a file into a GPU buffer
- * @ingroup file
+ * @ingroup sync
  *
  * @param [in] fh            \hipfile_handle_param
  * @param [in] buffer_base   \buffer_base_param
@@ -526,7 +525,7 @@ ssize_t hipFileRead(hipFileHandle_t fh, void *buffer_base, size_t size, hoff_t f
 
 /*!
  * @brief Synchronously write data from a GPU buffer to a file
- * @ingroup file
+ * @ingroup sync
  *
  * @param [in] fh            \hipfile_handle_param
  * @param [in] buffer_base   \buffer_base_param
@@ -597,6 +596,8 @@ int64_t hipFileUseCount(void);
  * @brief Get a list of GPU IO driver properties
  * @ingroup driver
  *
+ * \warn_not_implemented
+ *
  * @param [out] props See `hipFileDriverProps_t` for what properties are reported
  *
  * @return \hipfile_error_return
@@ -608,7 +609,7 @@ hipFileError_t hipFileDriverGetProperties(hipFileDriverProps_t *props);
  * @brief Enable/disable polling mode for GPU IO
  * @ingroup driver
  *
- * @note On NVIDIA, `poll_threshold_size` must be an increment of 4K
+ * \warn_not_implemented
  *
  * @param [in] poll `true` to enable polling, `false` to disable
  * @param [in] poll_threshold_size Maximum IO size (in KiB) for which polling is
@@ -623,7 +624,7 @@ hipFileError_t hipFileDriverSetPollMode(bool poll, size_t poll_threshold_size);
  * @brief Set the maximum IO chunk size
  * @ingroup driver
  *
- * @note Must be in 64k increments on NVIDIA
+ * \warn_not_implemented
  *
  * @param [in] max_direct_io_size Maximum IO chunk size (in KiB) for each IO request
  *
@@ -636,7 +637,7 @@ hipFileError_t hipFileDriverSetMaxDirectIOSize(size_t max_direct_io_size);
  * @brief Set the maximum amount of GPU memory that can be used for bounce buffers
  * @ingroup driver
  *
- * @note Must be in 4k increments on NVIDIA
+ * \warn_not_implemented
  *
  * @param [in] max_cache_size Maximum GPU memory (in KiB) that can be reserved for bounce buffers
  *
@@ -649,7 +650,7 @@ hipFileError_t hipFileDriverSetMaxCacheSize(size_t max_cache_size);
  * @brief Set the maximum amount of GPU memory that can be pinned
  * @ingroup driver
  *
- * @note Must be in 4K increments on NVIDIA
+ * \warn_not_implemented
  *
  * @param [in] max_pinned_size Maximum GPU memory (in KiB) that can be pinned
  *
@@ -697,6 +698,9 @@ typedef enum hipFileBatchMode {
  * @brief Input parameters for a batch IO request
  * @ingroup batch
  */
+// The field order is part of the public ABI and cannot be changed to
+// eliminate padding.
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 typedef struct hipFileIOParams {
     hipFileBatchMode_t mode; //!< Mode of the batch IO request
     union {
@@ -719,7 +723,9 @@ typedef struct hipFileIOParams {
 typedef struct hipFileIOEvents {
     void *cookie; //!< Optionally used to track IO operations (e.g. pointer to corresponding hipFileIOParams)
     hipFileStatus_t status; //!< Status of the batch IO operation
-    size_t          ret;    //!< Number of bytes transferred or POSIX error code if negative
+    size_t          ret;    //!< Number of bytes transferred or error code. Cast to ssize_t to inspect.
+                            //!< If non-negative, number of bytes transferred
+                            //!< If negative, POSIX or hipFileOpError_t error
 } hipFileIOEvents_t;
 
 /*!
@@ -729,11 +735,11 @@ typedef struct hipFileIOEvents {
 typedef void *hipFileBatchHandle_t;
 
 /*!
- * @brief Prepare the system to perform a batch IO operation
+ * @brief Prepare the system to perform batch IO operations
  * @ingroup batch
  *
  * @param [out] batch_idp \batch_handle_param
- * @param [in] max_nr     Maximum number of requests that can be submitted to this batch handle
+ * @param [in] max_nr     Size of the queue for this batch handle. Cannot exceed 128.
  *
  * @return \hipfile_error_return
  */
@@ -963,6 +969,8 @@ typedef enum hipFileStringConfigParameter_t {
  * @brief Get the value of a size_t configuration parameter
  * @ingroup core
  *
+ * \warn_not_implemented
+ *
  * @param param The configuration parameter
  * @param value The location to store the value of the configuration parameter
  *
@@ -978,6 +986,8 @@ hipFileError_t hipFileGetParameterSizeT(hipFileSizeTConfigParameter_t param, siz
  * @brief Get the value of a Boolean configuration parameter
  * @ingroup core
  *
+ * \warn_not_implemented
+ *
  * @param param The configuration parameter
  * @param value The location to store the value of the configuration parameter
  *
@@ -992,6 +1002,8 @@ hipFileError_t hipFileGetParameterBool(hipFileBoolConfigParameter_t param, bool 
 /*!
  * @brief Get the value of a string configuration parameter
  * @ingroup core
+ *
+ * \warn_not_implemented
  *
  * @param param    The configuration parameter
  * @param desc_str The location to store the value of the configuration parameter
@@ -1009,6 +1021,8 @@ hipFileError_t hipFileGetParameterString(hipFileStringConfigParameter_t param, c
  * @brief Set the value of a size_t configuration parameter
  * @ingroup core
  *
+ * \warn_not_implemented
+ *
  * @param param The configuration parameter
  * @param value The value of the configuration parameter
  *
@@ -1023,6 +1037,8 @@ hipFileError_t hipFileSetParameterSizeT(hipFileSizeTConfigParameter_t param, siz
 /*!
  * @brief Set the value of a Boolean configuration parameter
  * @ingroup core
+ *
+ * \warn_not_implemented
  *
  * @param param The configuration parameter
  * @param value The value of the configuration parameter
@@ -1039,6 +1055,8 @@ hipFileError_t hipFileSetParameterBool(hipFileBoolConfigParameter_t param, bool 
  * @brief Set the value of a string configuration parameter
  * @ingroup core
  *
+ * \warn_not_implemented
+ *
  * @param param    The configuration parameter
  * @param desc_str The value of the configuration parameter
  *
@@ -1049,6 +1067,200 @@ hipFileError_t hipFileSetParameterBool(hipFileBoolConfigParameter_t param, bool 
  */
 HIPFILE_API
 hipFileError_t hipFileSetParameterString(hipFileStringConfigParameter_t param, const char *desc_str);
+
+// ***********************************************************************
+//  STATS API
+// ***********************************************************************
+
+/*!
+ * @defgroup stats Stats API
+ *
+ * @brief Functions for querying hipFile I/O statistics
+ */
+
+/*!
+ * @brief Maximum number of GPUs tracked by the stats API
+ * @ingroup stats
+ */
+#define HIPFILE_MAX_GPUS 16
+
+/*!
+ * @brief Length of the GPU UUID field in hipFilePerGpuStats_t
+ * @ingroup stats
+ */
+#define HIPFILE_GPU_UUID_LEN 16
+
+/*!
+ * @brief Counter tracking successful and failed occurrences of an operation
+ * @ingroup stats
+ */
+typedef struct hipFileOpCounter {
+    uint64_t ok;  //!< Number of successful operations
+    uint64_t err; //!< Number of failed operations
+} hipFileOpCounter_t;
+
+/*!
+ * @brief Level 1 statistics: basic I/O and operation counters
+ * @ingroup stats
+ *
+ * Fields that hipFile does not track are zero-filled. Calculated fields
+ * (bandwidth, average latency) are derived from the counters that are tracked.
+ */
+typedef struct hipFileStatsLevel1 {
+    hipFileOpCounter_t read_ops;           //!< Read operation counters
+    hipFileOpCounter_t write_ops;          //!< Write operation counters
+    hipFileOpCounter_t hdl_register_ops;   //!< File handle register operation counters
+    hipFileOpCounter_t hdl_deregister_ops; //!< File handle deregister operation counters (zero-filled)
+    hipFileOpCounter_t buf_register_ops;   //!< Buffer register operation counters
+    hipFileOpCounter_t buf_deregister_ops; //!< Buffer deregister operation counters (zero-filled)
+
+    uint64_t read_bytes;             //!< Total bytes read
+    uint64_t write_bytes;            //!< Total bytes written
+    uint64_t read_bw_bytes_per_sec;  //!< Read bandwidth (bytes/sec), derived from bytes and latency sum
+    uint64_t write_bw_bytes_per_sec; //!< Write bandwidth (bytes/sec), derived from bytes and latency sum
+    uint64_t read_lat_avg_us;        //!< Average read latency (us), derived from latency sum and op count
+    uint64_t write_lat_avg_us;       //!< Average write latency (us), derived from latency sum and op count
+
+    uint64_t read_ops_per_sec;  //!< Read operations per second (zero-filled)
+    uint64_t write_ops_per_sec; //!< Write operations per second (zero-filled)
+
+    uint64_t read_lat_sum_us;  //!< Sum of read latencies (us)
+    uint64_t write_lat_sum_us; //!< Sum of write latencies (us)
+
+    hipFileOpCounter_t batch_submit_ops;          //!< Batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_complete_ops;        //!< Batch complete operation counters (zero-filled)
+    hipFileOpCounter_t batch_setup_ops;           //!< Batch setup operation counters (zero-filled)
+    hipFileOpCounter_t batch_cancel_ops;          //!< Batch cancel operation counters (zero-filled)
+    hipFileOpCounter_t batch_destroy_ops;         //!< Batch destroy operation counters (zero-filled)
+    hipFileOpCounter_t batch_enqueued_ops;        //!< Batch enqueue operation counters (zero-filled)
+    hipFileOpCounter_t batch_posix_enqueued_ops;  //!< POSIX batch enqueue operation counters (zero-filled)
+    hipFileOpCounter_t batch_processed_ops;       //!< Batch process operation counters (zero-filled)
+    hipFileOpCounter_t batch_posix_processed_ops; //!< POSIX batch process operation counters (zero-filled)
+    hipFileOpCounter_t batch_nvfs_submit_ops;     //!< NVFS batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_p2p_submit_ops;      //!< P2P batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_aio_submit_ops;      //!< AIO batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_iouring_submit_ops;  //!< io_uring batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_mixed_io_submit_ops; //!< Mixed IO batch submit operation counters (zero-filled)
+    hipFileOpCounter_t batch_total_submit_ops;    //!< Total batch submit operation counters (zero-filled)
+
+    uint64_t batch_read_bytes;            //!< Total batch read bytes (zero-filled)
+    uint64_t batch_write_bytes;           //!< Total batch write bytes (zero-filled)
+    uint64_t batch_read_bw_bytes;         //!< Batch read bandwidth (zero-filled)
+    uint64_t batch_write_bw_bytes;        //!< Batch write bandwidth (zero-filled)
+    uint64_t batch_submit_lat_avg_us;     //!< Average batch submit latency (zero-filled)
+    uint64_t batch_completion_lat_avg_us; //!< Average batch completion latency (zero-filled)
+    uint64_t batch_submit_ops_per_sec;    //!< Batch submit operations per second (zero-filled)
+    uint64_t batch_complete_ops_per_sec;  //!< Batch complete operations per second (zero-filled)
+    uint64_t batch_submit_lat_sum_us;     //!< Sum of batch submit latencies (zero-filled)
+    uint64_t batch_completion_lat_sum_us; //!< Sum of batch completion latencies (zero-filled)
+    uint64_t last_batch_read_bytes;       //!< Last batch read bytes (zero-filled)
+    uint64_t last_batch_write_bytes;      //!< Last batch write bytes (zero-filled)
+} hipFileStatsLevel1_t;
+
+/*!
+ * @brief Level 2 statistics: includes Level 1 plus I/O size histograms
+ * @ingroup stats
+ *
+ * The size histograms are zero-filled; hipFile tracks histograms with different
+ * bucket boundaries that are not directly mappable to this format.
+ */
+typedef struct hipFileStatsLevel2 {
+    hipFileStatsLevel1_t basic;                  //!< Level 1 statistics
+    uint64_t             read_size_kb_hist[32];  //!< Histogram of read sizes in KiB (zero-filled)
+    uint64_t             write_size_kb_hist[32]; //!< Histogram of write sizes in KiB (zero-filled)
+} hipFileStatsLevel2_t;
+
+/*!
+ * @brief Per-GPU statistics used in Level 3
+ * @ingroup stats
+ *
+ * Fields that hipFile does not track are zero-filled. The fastpath backend
+ * maps to @c n_nvfs_reads / @c n_nvfs_writes, and the fallback backend maps
+ * to @c n_posix_reads / @c n_posix_writes.
+ */
+typedef struct hipFilePerGpuStats {
+    char uuid[HIPFILE_GPU_UUID_LEN]; //!< GPU UUID (zero-filled)
+
+    uint64_t read_bytes;            //!< Total bytes read
+    uint64_t read_bw_bytes_per_sec; //!< Read bandwidth (bytes/sec), derived from bytes and duration
+    uint64_t read_utilization;      //!< Read utilization percentage (zero-filled)
+    uint64_t read_duration_us;      //!< Total read duration (us)
+    uint64_t n_total_reads;         //!< Total number of reads across all backends
+    uint64_t n_p2p_reads;           //!< Number of PCIe P2P DMA reads (zero-filled)
+    uint64_t n_nvfs_reads;          //!< Number of fastpath reads
+    uint64_t n_posix_reads;         //!< Number of fallback (POSIX) reads
+    uint64_t n_unaligned_reads;     //!< Number of unaligned reads
+    uint64_t n_dr_reads;            //!< Number of dynamic-routing reads (zero-filled)
+    uint64_t n_sparse_regions;      //!< Number of sparse regions (zero-filled)
+    uint64_t n_inline_regions;      //!< Number of inline regions (zero-filled)
+    uint64_t n_reads_err;           //!< Number of read errors
+
+    uint64_t write_bytes;            //!< Total bytes written
+    uint64_t write_bw_bytes_per_sec; //!< Write bandwidth (bytes/sec), derived from bytes and duration
+    uint64_t write_utilization;      //!< Write utilization percentage (zero-filled)
+    uint64_t write_duration_us;      //!< Total write duration (us)
+    uint64_t n_total_writes;         //!< Total number of writes across all backends
+    uint64_t n_p2p_writes;           //!< Number of PCIe P2P DMA writes (zero-filled)
+    uint64_t n_nvfs_writes;          //!< Number of fastpath writes
+    uint64_t n_posix_writes;         //!< Number of fallback (POSIX) writes
+    uint64_t n_unaligned_writes;     //!< Number of unaligned writes
+    uint64_t n_dr_writes;            //!< Number of dynamic-routing writes (zero-filled)
+    uint64_t n_writes_err;           //!< Number of write errors
+
+    uint64_t n_mmap;      //!< Number of buffer registrations (global counter, not per-GPU)
+    uint64_t n_mmap_ok;   //!< Successful buffer registrations (same as n_mmap)
+    uint64_t n_mmap_err;  //!< Failed buffer registrations (zero-filled)
+    uint64_t n_mmap_free; //!< Number of buffer deregistrations (zero-filled)
+    uint64_t reg_bytes;   //!< Total bytes registered (zero-filled)
+} hipFilePerGpuStats_t;
+
+/*!
+ * @brief Level 3 statistics: includes Level 2 plus per-GPU statistics
+ * @ingroup stats
+ *
+ * @c per_gpu_stats is indexed by GPU ordinal, not packed: entry @c i holds the
+ * stats for GPU @c i, and slots for inactive GPUs are zero-filled. @c num_gpus
+ * is the count of active GPUs, not the largest populated index. Consumers must
+ * iterate all @c HIPFILE_MAX_GPUS slots rather than @c 0..num_gpus-1.
+ */
+typedef struct hipFileStatsLevel3 {
+    hipFileStatsLevel2_t detailed;                        //!< Level 2 statistics
+    uint32_t             num_gpus;                        //!< Count of active GPUs
+    hipFilePerGpuStats_t per_gpu_stats[HIPFILE_MAX_GPUS]; //!< Per-GPU statistics, indexed by GPU ordinal
+} hipFileStatsLevel3_t;
+
+/*!
+ * @brief Get Level 1 hipFile statistics
+ * @ingroup stats
+ *
+ * @param [out] stats Pointer to a hipFileStatsLevel1_t structure to be filled
+ *
+ * @return \hipfile_error_return
+ */
+HIPFILE_API
+hipFileError_t hipFileGetStatsL1(hipFileStatsLevel1_t *stats);
+
+/*!
+ * @brief Get Level 2 hipFile statistics
+ * @ingroup stats
+ *
+ * @param [out] stats Pointer to a hipFileStatsLevel2_t structure to be filled
+ *
+ * @return \hipfile_error_return
+ */
+HIPFILE_API
+hipFileError_t hipFileGetStatsL2(hipFileStatsLevel2_t *stats);
+
+/*!
+ * @brief Get Level 3 hipFile statistics
+ * @ingroup stats
+ *
+ * @param [out] stats Pointer to a hipFileStatsLevel3_t structure to be filled
+ *
+ * @return \hipfile_error_return
+ */
+HIPFILE_API
+hipFileError_t hipFileGetStatsL3(hipFileStatsLevel3_t *stats);
 
 // Not a part of the public API
 #undef __HIPFILE_NODISCARD

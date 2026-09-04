@@ -29,11 +29,9 @@ list(APPEND CMAKE_MODULE_PATH ${HIP_COMMON_DIR}/cmake)
 #############################
 option(__HIP_ENABLE_PCH "Enable/Disable pre-compiled hip headers" ON)
 option(BUILD_SHARED_LIBS "Build the shared library" ON)
-
-if(MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi")
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG:FULL")
-endif()
+option(THEROCK_FLAG_STAMP_LIBRARY_GIT_VERSIONS
+  "Stamp git revisions into generated library version metadata"
+  ON)
 
 # Set default HIPCC_BIN_DIR to ${ROCM_PATH}/bin
 set(HIPCC_BIN_DIR "${ROCM_PATH}/bin" CACHE STRING "HIPCC and HIPCONFIG binary directories")
@@ -97,23 +95,32 @@ list(GET VERSION_LIST 2 HIP_VERSION_PATCH)
 
 set(HIP_VERSION_UNIXDATE 0)
 set(HIP_VERSION_GITDATE 0)
+set(HIP_VERSION_GITHASH "0000000")
 
 # FIXME: Two different version strings used.
 # Below we use UNIX commands, not compatible with Windows.
 if(GIT_FOUND)
-  # use the commit date, instead of build date
-  execute_process(COMMAND ${GIT_EXECUTABLE} show -s --format=%ct
+  # TheROCk builds perform shallow cloning having only latest single commit & without any commit history
+  # Fetch commit history for current branch
+  execute_process(COMMAND ${GIT_EXECUTABLE} fetch --unshallow
+    RESULT_VARIABLE git_result
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    ERROR_QUIET)
+
+  # use the clr commit date, instead of build date
+  execute_process(COMMAND ${GIT_EXECUTABLE} log -1 --format=%ct -- ${CMAKE_SOURCE_DIR}
     RESULT_VARIABLE git_result
     OUTPUT_VARIABLE git_output
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     OUTPUT_STRIP_TRAILING_WHITESPACE)
   if(git_result EQUAL 0)
     set(HIP_VERSION_UNIXDATE ${git_output})
+    message(STATUS "HIP_VERSION_UNIXDATE: ${HIP_VERSION_UNIXDATE}")
   endif()
 
   # get date information based on UTC
   # use the last two digits of year + week number + day in the week as HIP_VERSION_GITDATE
-  execute_process(COMMAND ${Python3_EXECUTABLE} -c "import time; print(time.strftime('%y%W%w', time.gmtime(${HIP_VERSION_UNIXDATE})))"
+  execute_process(COMMAND ${Python3_EXECUTABLE} -c "import time; print(time.strftime('%y%U%w', time.gmtime(${HIP_VERSION_UNIXDATE})))"
     RESULT_VARIABLE git_result
     OUTPUT_VARIABLE git_output
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
@@ -122,36 +129,34 @@ if(GIT_FOUND)
     set(HIP_VERSION_GITDATE ${git_output})
   endif()
 
-  # get commit short hash
-  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    RESULT_VARIABLE git_result
-    OUTPUT_VARIABLE git_output
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(git_result EQUAL 0)
-    set(HIP_VERSION_GITHASH ${git_output})
+  if(THEROCK_FLAG_STAMP_LIBRARY_GIT_VERSIONS)
+	  # get commit short hash
+	  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+	    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        RESULT_VARIABLE git_result
+        OUTPUT_VARIABLE git_output
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(git_result EQUAL 0)
+        set(HIP_VERSION_GITHASH ${git_output})
+      endif()
   endif()
 
-  if(HIP_VERSION_PATCH EQUAL 0 AND HIP_VERSION_UNIXDATE GREATER 0)
-    set(HIP_VERSION_PATCH ${HIP_VERSION_GITDATE})
-    message(STATUS "Using HIP major, minor versions from VERSION file & patch version from git commit date: ${HIP_VERSION_MAJOR}.${HIP_VERSION_MINOR}.${HIP_VERSION_PATCH}")
-  else()
-    message(STATUS "Using HIP version from VERSION file: ${HIP_VERSION_MAJOR}.${HIP_VERSION_MINOR}.${HIP_VERSION_PATCH}")
-  endif()
+endif()
 
-  set(HIP_VERSION_BUILD_ID 0)
-  set(HIP_VERSION_BUILD_NAME "")
-
-  if(DEFINED ENV{ROCM_LIBPATCH_VERSION})
-    set(HIP_PACKAGING_VERSION_PATCH ${HIP_VERSION_PATCH}.$ENV{ROCM_LIBPATCH_VERSION})
-  else()
-    set(HIP_PACKAGING_VERSION_PATCH ${HIP_VERSION_PATCH}-${HIP_VERSION_GITHASH})
-  endif()
+if(HIP_VERSION_PATCH EQUAL 0 AND HIP_VERSION_UNIXDATE GREATER 0)
+  set(HIP_VERSION_PATCH ${HIP_VERSION_GITDATE})
+  message(STATUS "Using HIP major, minor versions from VERSION file & patch version from clr commit date: ${HIP_VERSION_MAJOR}.${HIP_VERSION_MINOR}.${HIP_VERSION_PATCH}")
 else()
-  set(HIP_VERSION_BUILD_ID 0)
-  set(HIP_VERSION_BUILD_NAME "")
-  # FIXME: Some parts depend on this being set.
-  set(HIP_PACKAGING_VERSION_PATCH "0")
+  message(STATUS "Using HIP version from VERSION file: ${HIP_VERSION_MAJOR}.${HIP_VERSION_MINOR}.${HIP_VERSION_PATCH}")
+endif()
+
+set(HIP_VERSION_BUILD_ID 0)
+set(HIP_VERSION_BUILD_NAME "")
+
+if(DEFINED ENV{ROCM_LIBPATCH_VERSION})
+  set(HIP_PACKAGING_VERSION_PATCH ${HIP_VERSION_PATCH}.$ENV{ROCM_LIBPATCH_VERSION})
+else()
+  set(HIP_PACKAGING_VERSION_PATCH ${HIP_VERSION_PATCH}-${HIP_VERSION_GITHASH})
 endif()
 
 ## Debian package specific variables

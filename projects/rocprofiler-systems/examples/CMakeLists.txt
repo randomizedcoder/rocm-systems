@@ -81,7 +81,6 @@ set(ROCPROFSYS_EXAMPLE_DIRS
     transpose
     parallel-overhead
     code-coverage
-    user-api
     openmp
     mpi
     python
@@ -93,14 +92,17 @@ set(ROCPROFSYS_EXAMPLE_DIRS
     fork
     videodecode
     jpegdecode
+    hipfile
     roctx
     thread-limit
     transferBench
     hpc
     shmem
     scratch-memory
-    sdma_test
+    sdma-test
+    rocshmem
     unified-memory
+    minimal
 )
 
 foreach(_example_dir IN LISTS ROCPROFSYS_EXAMPLE_DIRS)

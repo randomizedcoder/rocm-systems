@@ -3,6 +3,7 @@
 
 #include "library/components/mpi_gotcha.hpp"
 #include "api.hpp"
+#include "common/env_vars.hpp"
 #include "core/components/fwd.hpp"
 #include "core/config.hpp"
 #include "core/mpi.hpp"
@@ -59,7 +60,7 @@ struct comm_rank_data
 
     friend bool operator>(const comm_rank_data& _lhs, const comm_rank_data& _rhs)
     {
-        if(get_is_continuous_integration() && !_lhs.updated() && !_rhs.updated())
+        if(!_lhs.updated() && !_rhs.updated())
         {
             throw std::runtime_error("Error! Comparing rank data that is not updated");
         }
@@ -80,10 +81,10 @@ struct comm_rank_data
     }
 };
 
-uint64_t mpip_index        = std::numeric_limits<uint64_t>::max();
-auto     last_comm_record  = comm_rank_data{};
-auto     mproc_comm_record = comm_rank_data{};
-auto     mpi_comm_records  = std::map<uintptr_t, comm_rank_data>{};
+std::uint64_t mpip_index        = std::numeric_limits<std::uint64_t>::max();
+auto          last_comm_record  = comm_rank_data{};
+auto          mproc_comm_record = comm_rank_data{};
+auto          mpi_comm_records  = std::map<uintptr_t, comm_rank_data>{};
 
 using tim::auto_lock_t;
 using tim::type_mutex;
@@ -102,7 +103,7 @@ rocprofsys_mpi_fini(MPI_Comm, int, void*, void*)
     auto _blocked = get_sampling_signals();
     if(!_blocked.empty())
         tim::signals::block_signals(_blocked, tim::signals::sigmask_scope::process);
-    if(mpip_index != std::numeric_limits<uint64_t>::max())
+    if(mpip_index != std::numeric_limits<std::uint64_t>::max())
         deactivate_mpip<mpip_bundle_t, project::rocprofsys>(mpip_index);
     if(is_root_process()) rocprofsys_finalize_hidden();
     return MPI_SUCCESS;
@@ -181,7 +182,7 @@ void
 mpi_gotcha::subscribe_to_init_event(
     const std::function<void(int rank, int size)>& _callback)
 {
-    std::lock_guard<std::mutex> _lk{ s_on_init_callbacks_mutex };
+    const std::lock_guard<std::mutex> _lk{ s_on_init_callbacks_mutex };
     if(_callback)
     {
         s_on_init_callbacks.push_back(_callback);
@@ -199,14 +200,14 @@ std::mutex mpi_gotcha::s_mutex = {};
 void
 mpi_gotcha::pause()
 {
-    std::scoped_lock<std::mutex> _lk{ s_mutex };
+    const std::scoped_lock<std::mutex> _lk{ s_mutex };
     mpi_gotcha_t::set_ready(false);
 }
 
 void
 mpi_gotcha::resume()
 {
-    std::scoped_lock<std::mutex> _lk{ s_mutex };
+    const std::scoped_lock<std::mutex> _lk{ s_mutex };
     mpi_gotcha_t::set_ready(true);
 }
 
@@ -289,14 +290,15 @@ mpi_gotcha::audit([[maybe_unused]] const gotcha_data_t& _data, audit::incoming)
     if(!_blocked.empty())
         tim::signals::block_signals(_blocked, tim::signals::sigmask_scope::process);
 
-    if(mpip_index != std::numeric_limits<uint64_t>::max())
+    if(mpip_index != std::numeric_limits<std::uint64_t>::max())
         deactivate_mpip<mpip_bundle_t, project::rocprofsys>(mpip_index);
 
 #if !defined(ROCPROFSYS_USE_MPI) && defined(ROCPROFSYS_USE_MPI_HEADERS)
     rocprofsys::mpi::is_initialized_callback() = []() { return false; };
     rocprofsys::mpi::is_finalized()            = true;
 #else
-    if(is_root_process() && rocprofsys::get_state() < rocprofsys::State::Finalized)
+    if(is_root_process() &&
+       rocprofsys::state::process::get() < rocprofsys::state::process::Finalized)
         rocprofsys_finalize_hidden();
 #endif
 }
@@ -353,7 +355,7 @@ mpi_gotcha::audit(const gotcha_data_t& _data, audit::outgoing, int _retval)
             mpip_index = activate_mpip<mpip_bundle_t, project::rocprofsys>();
         }
 
-        auto_lock_t _lk{ type_mutex<mpi_gotcha>() };
+        const auto_lock_t _lk{ type_mutex<mpi_gotcha>() };
         if(!mproc_comm_record.updated())
         {
             populate_rank_and_size();
@@ -365,7 +367,7 @@ mpi_gotcha::audit(const gotcha_data_t& _data, audit::outgoing, int _retval)
             (_data.tool_id.find("MPI_Comm_") == 0 ||
              _data.tool_id.find("PMPI_Comm_") == 0))
     {
-        auto_lock_t _lk{ type_mutex<mpi_gotcha>() };
+        const auto_lock_t _lk{ type_mutex<mpi_gotcha>() };
         if(m_comm_val != null_comm())
         {
             auto& _comm_entry = mpi_comm_records[m_comm_val];
@@ -395,8 +397,8 @@ mpi_gotcha::audit(const gotcha_data_t& _data, audit::outgoing, int _retval)
             if(_comm_entry.updated())
             {
                 static thread_local int _num_updates = 0;
-                static int              _disable_after =
-                    tim::get_env<int>("ROCPROFSYS_MPI_MAX_COMM_UPDATES", 4);
+                static const int        _disable_after =
+                    rocprofsys::get_env<int>(env_vars::MPI_MAX_COMM_UPDATES, 4);
                 if(_num_updates++ < _disable_after) update();
             }
         }

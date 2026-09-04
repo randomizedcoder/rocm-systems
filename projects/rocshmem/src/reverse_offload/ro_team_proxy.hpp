@@ -28,20 +28,21 @@
 #include "device_proxy.hpp"
 #include "ro_net_team.hpp"
 #include "mpi_instance.hpp"
+#include "memory/hip_allocator.hpp"
 
 namespace rocshmem {
 
-template <typename ALLOCATOR>
 class ROTeamProxy {
-  using ProxyT = DeviceProxy<ALLOCATOR, ROTeam>;
+  using ProxyT = DeviceProxy<ROTeam>;
 
  public:
   /*
    * Placement new the memory which is allocated by proxy_
    */
   ROTeamProxy(Backend* backend, MPI_Comm comm, int pe, int npes,
+              const HIPAllocator& alloc = HIPAllocator(),
               size_t num_elems = 1)
-    : proxy_{num_elems} {
+    : alloc_{alloc}, proxy_{num_elems, alloc_} {
 
     mpilib_ftable_.Comm_dup(comm, &team_world_comm_);
 
@@ -81,13 +82,12 @@ class ROTeamProxy {
    */
   MPI_Comm team_world_comm_;
 
+  HIPAllocator alloc_{};
   /*
    * @brief Memory managed by the lifetime of this object
    */
   ProxyT proxy_{};
 };
-
-using ROTeamProxyT = ROTeamProxy<HIPAllocator>;
 
 }  // namespace rocshmem
 

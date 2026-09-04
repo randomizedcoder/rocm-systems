@@ -14,6 +14,7 @@
 #include "library/thread_data.hpp"
 #include "library/thread_info.hpp"
 #include "library/tracing.hpp"
+#include <cstdint>
 
 #include <timemory/components/timing/backends.hpp>
 #include <timemory/components/timing/wall_clock.hpp>
@@ -21,7 +22,6 @@
 #include <timemory/mpl/type_traits.hpp>
 #include <timemory/mpl/types.hpp>
 #include <timemory/process/threading.hpp>
-#include <timemory/units.hpp>
 #include <timemory/utility/backtrace.hpp>
 
 #include "logger/debug.hpp"
@@ -31,11 +31,7 @@
 #include <execinfo.h>
 #include <type_traits>
 
-namespace rocprofsys
-{
-namespace causal
-{
-namespace component
+namespace rocprofsys::causal::component
 {
 namespace
 {
@@ -77,7 +73,7 @@ backtrace::global_init()
 void
 overflow::sample(int _sig)
 {
-    ROCPROFSYS_SCOPED_THREAD_STATE(ThreadState::Internal);
+    auto _thread_state_guard = state::thread::scoped(state::thread::Internal);
 
     static thread_local const auto& _tinfo      = thread_info::get();
     auto                            _tid        = _tinfo->index_data->sequent_value;
@@ -125,10 +121,10 @@ overflow::sample(int _sig)
 void
 backtrace::sample(int _sig)
 {
-    constexpr size_t  depth        = ::rocprofsys::causal::unwind_depth;
-    constexpr int64_t ignore_depth = ::rocprofsys::causal::unwind_offset;
-    constexpr size_t  select_init  = std::numeric_limits<size_t>::max();
-    constexpr size_t  select_ival  = 5;  // interval at which realtime signal contributes
+    constexpr size_t       depth        = ::rocprofsys::causal::unwind_depth;
+    constexpr std::int64_t ignore_depth = ::rocprofsys::causal::unwind_offset;
+    constexpr size_t       select_init  = std::numeric_limits<size_t>::max();
+    constexpr size_t select_ival = 5;  // interval at which realtime signal contributes
 
     // update the last sample for backtrace signal(s) even when in use
     static thread_local size_t _protect_flag = 0;
@@ -146,9 +142,9 @@ backtrace::sample(int _sig)
 
     ++_protect_flag;
     // on RedHat, the unw_step within get_unw_signal_frame_stack_raw involves a mutex lock
-    ROCPROFSYS_SCOPED_THREAD_STATE(ThreadState::Internal);
-    m_index = causal::experiment::get_index();
-    m_stack = get_unw_signal_frame_stack_raw<depth, ignore_depth>();
+    auto _thread_state_guard = state::thread::scoped(state::thread::Internal);
+    m_index                  = causal::experiment::get_index();
+    m_stack                  = get_unw_signal_frame_stack_raw<depth, ignore_depth>();
 
     auto _set_current_selection = [](auto _stack) {
         // save the former selection count
@@ -206,24 +202,4 @@ backtrace::sample(int _sig)
     ++_protect_flag;
 }
 
-template <typename Tp>
-Tp
-backtrace::get_period(uint64_t _units)
-{
-    using cast_type = std::conditional_t<std::is_floating_point<Tp>::value, Tp, double>;
-
-    double  _period      = 1.0 / 1000.0;
-    int64_t _period_nsec = static_cast<int64_t>(_period * units::sec) % units::sec;
-    return static_cast<Tp>(_period_nsec) / static_cast<cast_type>(_units);
-}
-}  // namespace component
-}  // namespace causal
-}  // namespace rocprofsys
-
-#define INSTANTIATE_BT_CAUSAL_PERIOD(TYPE)                                               \
-    template TYPE rocprofsys::causal::component::backtrace::get_period<TYPE>(uint64_t);
-
-INSTANTIATE_BT_CAUSAL_PERIOD(float)
-INSTANTIATE_BT_CAUSAL_PERIOD(double)
-INSTANTIATE_BT_CAUSAL_PERIOD(int64_t)
-INSTANTIATE_BT_CAUSAL_PERIOD(uint64_t)
+}  // namespace rocprofsys::causal::component

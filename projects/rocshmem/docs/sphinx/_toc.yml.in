@@ -11,7 +11,8 @@ subtrees:
   entries:
   - file: install.rst
     title: Install rocSHMEM
-
+  - file: build.rst
+    title: Build from source
 
 - caption: How to
   entries:
@@ -52,6 +53,8 @@ subtrees:
     title: Point-to-point synchronization routines
   - file: api/memory_ordering.rst
     title: Memory ordering routines
+  - file: api/tile.rst
+    title: Tile routines
 
 - caption: About
   entries:

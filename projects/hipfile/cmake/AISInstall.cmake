@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+include_guard(GLOBAL)
+
 # Install hipFile
 
 # From the rocm-cmake repo
@@ -18,7 +20,12 @@ rocm_install(
 )
 
 # Install AIS tools
+if(AIS_INSTALL_TOOLS)
 install(PROGRAMS tools/ais-check/ais-check DESTINATION bin)
+    if(TARGET ais-stats)
+        install(TARGETS ais-stats DESTINATION bin)
+    endif()
+endif()
 
 # Install example code
 # Since the input DIRECTORY is `examples` don't include it in
@@ -37,37 +44,53 @@ if(AIS_INSTALL_EXAMPLES)
     # The CMakeLists.txt files in the examples tree use our build
     # flags and infrastructure so we can ensure they are well-vetted
     # and these can't be installed.
-
-    # aiscp
-    configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/examples/aiscp/CMakeLists.install.cmake"
-        "examples/aiscp/CMakeLists.txt"
-        @ONLY
+    set(AIS_EXAMPLE_DIRS
+        aiscp
+        api
+        common
+        basics
+        async
     )
-    install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/examples/aiscp/CMakeLists.txt"
-        DESTINATION "share/doc/${CMAKE_PROJECT_NAME}/examples/aiscp/"
-    )
-
-    # API examples
-    configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/examples/api/CMakeLists.install.in"
-        "examples/api/CMakeLists.txt"
-        @ONLY
-    )
-    install(FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/examples/api/CMakeLists.txt"
-        DESTINATION "share/doc/${CMAKE_PROJECT_NAME}/examples/api/"
-    )
+    foreach(example_dir ${AIS_EXAMPLE_DIRS})
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/${example_dir}/CMakeLists.install.cmake"
+            "examples/${example_dir}/CMakeLists.txt"
+            @ONLY
+        )
+        install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/examples/${example_dir}/CMakeLists.txt"
+            DESTINATION "share/doc/${CMAKE_PROJECT_NAME}/examples/${example_dir}/"
+        )
+    endforeach()
 endif()
 
 # When we have RELEASE/DEV builds set up, we can split
 # where these dependencies are added.
 # For now, just add both runtime & dev deps.
 
-# AMD Runtime Dependencies
+# AMD ROCm Runtime + Dev Dependencies
 if(CMAKE_HIP_PLATFORM STREQUAL "amd")
-    rocm_package_add_dependencies(DEPENDS hip-runtime-amd) # Need minimum version
+    string(REGEX MATCH "^([0-9]+)\\.([0-9]+)" _rocm_mm "${ROCM_VERSION}")
+    if(NOT _rocm_mm)
+        message(FATAL_ERROR
+            "ROCM_VERSION='${ROCM_VERSION}' does not match the expected "
+            "MAJOR.MINOR[.PATCH] form (e.g., 7.13.0).")
+    endif()
+    set(_rocm_major "${CMAKE_MATCH_1}")
+    set(_rocm_minor "${CMAKE_MATCH_2}")
+    if(_rocm_major GREATER 7 OR (_rocm_major EQUAL 7 AND _rocm_minor GREATER_EQUAL 11))
+        # rocm-core is a meta-package all legacy ROCm packages depend on. It does not
+        # exist in the current ROCm package repository.
+        # Suppress rocm-cmake's auto-added rocm-core dependency.
+        set(ROCM_DEP_ROCMCORE OFF CACHE BOOL "" FORCE)
+        rocm_package_add_deb_dependencies(DEPENDS "amdrocm-runtime-dev${_rocm_major}.${_rocm_minor}")
+        rocm_package_add_rpm_dependencies(DEPENDS "amdrocm-runtime-devel${_rocm_major}.${_rocm_minor}")
+    else()
+        rocm_package_add_dependencies(DEPENDS hip-runtime-amd) # Need minimum version
+        rocm_package_add_deb_dependencies(DEPENDS hip-dev) # Need minimum version
+        rocm_package_add_rpm_dependencies(DEPENDS hip-devel)
+    endif()
+
     # Suppressing libmount RELEASE dependency for now for the following:
     # 1) We currently default to DEV builds.
     # 2) libmount naming convention is not consistent across distros.
@@ -76,13 +99,6 @@ if(CMAKE_HIP_PLATFORM STREQUAL "amd")
     #    rocky    (RPM): libmount
     #    Ubuntu   (DEB): libmount1
     #rocm_package_add_dependencies(DEPENDS libmount)
-endif()
-
-# AMD Development Dependencies
-if(CMAKE_HIP_PLATFORM STREQUAL "amd")
-    rocm_package_add_deb_dependencies(DEPENDS hip-dev) # Need minimum version
-    rocm_package_add_rpm_dependencies(DEPENDS hip-devel)
-
     rocm_package_add_deb_dependencies(DEPENDS libmount-dev)
     rocm_package_add_rpm_dependencies(DEPENDS libmount-devel)
 endif()
@@ -132,6 +148,32 @@ set(CPACK_RPM_PACKAGE_AUTOPROV ON)
 set(CPACK_RPM_PACKAGE_AUTOREQ OFF)
 # Alternatively, we could set CPACK_RPM_PACKAGE_PROVIDES,
 # but then we would have to maintain it...
+
+# Do not claim ownership of the directories ROCm provides.
+#
+# CPack auto-generates a %dir entry for every parent directory of an installed
+# file. As such, installing into ROCm's prefix declares this package as a
+# co-owner. RPM permits co-ownership only when mode, owner, and group match
+# exactly, otherwise RPM declares a file conflict and aborts the install. ROCm
+# is a hard dependency, so these parent directories must exist; hipfile does not
+# need to co-own them.
+#
+# ROCm 7.14+ changed the ownership permissions by setting the `setgid` bit for
+# ROCm's directories (nightly releases currently do not have this property).
+# We cannot fine tune the permissions ourselves as CPack does not support
+# configuring `setgid`. By explicitly excluding co-ownership of any parent
+# directories, we can avoid this conflict cleanly.
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+    "/opt"
+    "/opt/rocm"
+    "${CMAKE_INSTALL_PREFIX}"
+    "${CMAKE_INSTALL_PREFIX}/bin"
+    "${CMAKE_INSTALL_PREFIX}/include"
+    "${CMAKE_INSTALL_PREFIX}/lib"
+    "${CMAKE_INSTALL_PREFIX}/lib/cmake"
+    "${CMAKE_INSTALL_PREFIX}/share"
+    "${CMAKE_INSTALL_PREFIX}/share/doc"
+)
 
 # Set DEB/RPM Release Information
 # rocm_create_package checks if following variables are defined in the environment:

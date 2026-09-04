@@ -467,7 +467,7 @@ HIP_TEST_CASE(Unit_Uuid_FntlTstsFor_SetEnv_HIP_VISIBLE_DEVICES) {
     }
 #endif
   } else {
-    HipTest::HIP_SKIP_TEST(HipTest::SkipReason::kNoGpuDevice);  // NOLINT
+    HIP_SKIP_TEST(HipTest::SkipReason::kNoGpuDevice);  // NOLINT
   }
 }
 
@@ -476,16 +476,16 @@ void ChkUUID() {
     return;
   }
   int devCount = 0;
-  HIP_CHECK(hipGetDeviceCount(&devCount));
+  HIP_CHECK_THREAD(hipGetDeviceCount(&devCount));
   if (devCount != 1) {
     tState = 0;
     return;
   }
   hipDevice_t device;
-  HIP_CHECK(hipSetDevice(0));
-  HIP_CHECK(hipDeviceGet(&device, 0));
+  HIP_CHECK_THREAD(hipSetDevice(0));
+  HIP_CHECK_THREAD(hipDeviceGet(&device, 0));
   hipUUID d_uuid{0};
-  HIP_CHECK(hipDeviceGetUuid(&d_uuid, device));
+  HIP_CHECK_THREAD(hipDeviceGetUuid(&d_uuid, device));
   std::map<int, std::string> uuid_map;
   auto getNthElem = [&uuid_map](int pos) {
      return std::next(uuid_map.begin(), pos)->second;
@@ -521,7 +521,6 @@ void setEnv() {
     setenv("HIP_VISIBLE_DEVICES", uuidEnv.c_str(), 1);
   } else {
     tState = 2;
-    HipTest::HIP_SKIP_TEST(HipTest::SkipReason::kFewerThanTwoGpus);  // NOLINT
   }
 }
 /**
@@ -542,9 +541,13 @@ HIP_TEST_CASE(Unit_UUID_setEnv_Thread) {
   // Create Thread one
   std::thread t1(setEnv);
   t1.join();
+  if (tState == 2) {
+    HIP_SKIP_TEST("Skipping because this machine has total GPUs < 2");
+  }
   // Create Thread two
   std::thread t2(ChkUUID);
   t2.join();
+  HIP_CHECK_THREAD_FINALIZE();
   REQUIRE(tState != 0);
 }
 #endif

@@ -45,9 +45,9 @@ process_cpu_info_data()
     };
 
     auto trim_whitespace = [](const std::string& str) -> std::string {
-        size_t start = str.find_first_not_of(" \t");
+        const size_t start = str.find_first_not_of(" \t");
         if(start == std::string::npos) return "";
-        size_t end = str.find_last_not_of(" \t");
+        const size_t end = str.find_last_not_of(" \t");
         return str.substr(start, end - start + 1);
     };
 
@@ -97,14 +97,14 @@ process_cpu_info_data()
             continue;
         }
 
-        size_t colon_pos = line.find(':');
+        const size_t colon_pos = line.find(':');
         if(colon_pos == std::string::npos)
         {
             continue;
         }
 
-        std::string key   = trim_whitespace(line.substr(0, colon_pos));
-        std::string value = trim_whitespace(line.substr(colon_pos + 1));
+        std::string       key   = trim_whitespace(line.substr(0, colon_pos));
+        const std::string value = trim_whitespace(line.substr(colon_pos + 1));
 
         std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
@@ -169,8 +169,8 @@ query_cpu_agents()
 
     // Insert one agent per socket in ascending socket_id order
     // so that device_type_index == socket_id
-    auto&    mgr        = get_agent_manager_instance();
-    uint32_t node_count = 0;
+    auto&         mgr        = get_agent_manager_instance();
+    std::uint32_t node_count = 0;
 
     for(const auto& [socket_id, model_name] : socket_model_names)
     {
@@ -178,15 +178,14 @@ query_cpu_agents()
         const auto device_name = "CPU" + std::to_string(socket_id);
         auto       cur_agent   = agent{ agent_type::CPU,
                                 0,
-                                static_cast<uint32_t>(socket_id),
+                                static_cast<std::uint32_t>(socket_id),
                                 node_id,
-                                static_cast<int32_t>(socket_id),
-                                static_cast<int32_t>(socket_id),
+                                static_cast<std::int32_t>(socket_id),
+                                static_cast<std::int32_t>(socket_id),
                                 device_name,
                                 model_name,
                                 socket_vendor_ids[socket_id],
                                 "",
-                                0,
                                 0,
                                 "" };
         mgr.insert_agent(cur_agent);

@@ -3,6 +3,7 @@
 
 #include "library/causal/sampling.hpp"
 #include "binary/analysis.hpp"
+#include "common/env_vars.hpp"
 #include "core/common.hpp"
 #include "core/concepts.hpp"
 #include "core/config.hpp"
@@ -17,6 +18,7 @@
 #include "library/sampling.hpp"
 #include "library/thread_data.hpp"
 #include "library/thread_info.hpp"
+#include <cstdint>
 
 #include <timemory/macros.hpp>
 #include <timemory/mpl/types.hpp>
@@ -24,7 +26,6 @@
 #include <timemory/sampling/overflow.hpp>
 #include <timemory/sampling/sampler.hpp>
 #include <timemory/sampling/timer.hpp>
-#include <timemory/units.hpp>
 #include <timemory/utility/backtrace.hpp>
 #include <timemory/variadic.hpp>
 
@@ -83,7 +84,7 @@ struct causal_sampling
 {};
 
 std::set<int>
-configure(bool _setup, int64_t _tid = threading::get_id());
+configure(bool _setup, std::int64_t _tid = threading::get_id());
 
 std::shared_ptr<causal_sampler_allocator_t>&
 get_causal_sampler_allocator(bool _construct)
@@ -119,7 +120,7 @@ get_causal_samplers()
 }
 
 std::set<int>&
-get_causal_sampler_signals(int64_t _tid)
+get_causal_sampler_signals(std::int64_t _tid)
 {
     auto& _data = get_causal_sampler_signals();
     if(static_cast<size_t>(_tid) >= _data->size())
@@ -128,7 +129,7 @@ get_causal_sampler_signals(int64_t _tid)
 }
 
 bool&
-get_causal_sampler_running(int64_t _tid)
+get_causal_sampler_running(std::int64_t _tid)
 {
     auto& _data = get_causal_sampler_running();
     if(static_cast<size_t>(_tid) >= _data->size()) _data->resize(_tid + 1, false);
@@ -136,7 +137,7 @@ get_causal_sampler_running(int64_t _tid)
 }
 
 auto&
-get_causal_sampler(int64_t _tid)
+get_causal_sampler(std::int64_t _tid)
 {
     auto& _data = get_causal_samplers();
     if(static_cast<size_t>(_tid) >= _data->size()) _data->resize(_tid + 1);
@@ -144,10 +145,10 @@ get_causal_sampler(int64_t _tid)
 }
 
 void
-causal_offload_buffer(int64_t, causal_sampler_buffer_t&& _buf)
+causal_offload_buffer(std::int64_t, causal_sampler_buffer_t&& _buf)
 {
     auto _data      = std::move(_buf);
-    auto _processed = std::map<uint32_t, std::map<uintptr_t, uint64_t>>{};
+    auto _processed = std::map<std::uint32_t, std::map<uintptr_t, std::uint64_t>>{};
     while(!_data.is_empty())
     {
         auto _bundle = causal_sampler_bundle_t{};
@@ -192,7 +193,7 @@ causal_offload_buffer(int64_t, causal_sampler_buffer_t&& _buf)
 }
 
 std::set<int>
-configure(bool _setup, int64_t _tid)
+configure(bool _setup, std::int64_t _tid)
 {
     const auto& _info         = thread_info::get(_tid, SequentTID);
     auto&       _causal       = get_causal_sampler(_tid);
@@ -234,7 +235,7 @@ configure(bool _setup, int64_t _tid)
         if(_tid > 0 && _info && _info->is_offset) return std::set<int>{};
         // if the thread state is disabled or completed, return
         if(_info && _info->index_data->sequent_value == _tid &&
-           get_thread_state() == ThreadState::Disabled)
+           state::thread::get() == state::thread::Disabled)
             return std::set<int>{};
 
         (void) get_debug_sampling();  // make sure query in sampler does not allocate
@@ -259,14 +260,14 @@ configure(bool _setup, int64_t _tid)
                 backtrace_enabled::set(false);
                 backtrace_enabled::set(scope::thread_scope{}, false);
                 _causal->configure(overflow{ get_sampling_overflow_signal(),
-                                             [](int, pid_t, long, int64_t) {
+                                             [](int, pid_t, long, std::int64_t) {
                                                  // perf::get_instance(_idx)->set_ready_signal(_sig);
                                                  return true;
                                              },
-                                             [](int, pid_t, long, int64_t _idx) {
+                                             [](int, pid_t, long, std::int64_t _idx) {
                                                  return perf::get_instance(_idx)->start();
                                              },
-                                             [](int, pid_t, long, int64_t _idx) {
+                                             [](int, pid_t, long, std::int64_t _idx) {
                                                  return perf::get_instance(_idx)->stop();
                                              },
                                              _tid, threading::get_sys_tid() });
@@ -291,7 +292,7 @@ configure(bool _setup, int64_t _tid)
         if(!_causal)
         {
             LOG_CRITICAL("nullptr to causal profiling instance");
-            ::rocprofsys::set_state(::rocprofsys::State::Finalized);
+            ::rocprofsys::state::process::set(::rocprofsys::state::process::Finalized);
             std::abort();
         }
 
@@ -299,7 +300,7 @@ configure(bool _setup, int64_t _tid)
         _causal->set_verbose(_verbose);
         _causal->set_offload(&causal_offload_buffer);
 
-        if(get_causal_backend() == CausalBackend::Perf)
+        if(get_causal_backend() == state::process::CausalBackend::Perf)
         {
             auto _perf_error = _activate_perf_backend();
             if(_perf_error)
@@ -309,7 +310,7 @@ configure(bool _setup, int64_t _tid)
                 std::exit(1);
             }
         }
-        else if(get_causal_backend() == CausalBackend::Timer)
+        else if(get_causal_backend() == state::process::CausalBackend::Timer)
         {
             if(!_activate_timer_backend())
             {
@@ -317,12 +318,12 @@ configure(bool _setup, int64_t _tid)
                 std::exit(1);
             }
         }
-        else if(get_causal_backend() == CausalBackend::Auto)
+        else if(get_causal_backend() == state::process::CausalBackend::Auto)
         {
             auto _perf_error = _activate_perf_backend();
             if(!_perf_error)
             {
-                config::set_setting_value("ROCPROFSYS_CAUSAL_BACKEND",
+                config::set_setting_value(std::string{ env_vars::CAUSAL_BACKEND },
                                           std::string{ "perf" });
             }
             else
@@ -336,7 +337,7 @@ configure(bool _setup, int64_t _tid)
                     std::exit(1);
                 }
 
-                config::set_setting_value("ROCPROFSYS_CAUSAL_BACKEND",
+                config::set_setting_value(std::string{ env_vars::CAUSAL_BACKEND },
                                           std::string{ "timer" });
             }
         }
@@ -363,7 +364,7 @@ configure(bool _setup, int64_t _tid)
             // this propagates to all threads
             _causal->ignore(_signal_types);
 
-            for(int64_t i = 1; i < ROCPROFSYS_MAX_THREADS; ++i)
+            for(std::int64_t i = 1; i < ROCPROFSYS_MAX_THREADS; ++i)
             {
                 if(get_causal_sampler(i))
                 {
@@ -393,11 +394,11 @@ configure(bool _setup, int64_t _tid)
 }
 
 void
-post_process_causal(int64_t _tid, const std::vector<causal_bundle_t>& _data);
+post_process_causal(std::int64_t _tid, const std::vector<causal_bundle_t>& _data);
 }  // namespace
 
 std::set<int>
-get_signal_types(int64_t _tid)
+get_signal_types(std::int64_t _tid)
 {
     return (get_causal_sampler_signals()) ? get_causal_sampler_signals(_tid)
                                           : std::set<int>{};
@@ -458,19 +459,15 @@ sampling_signals()
 }  // namespace
 
 template <typename ScopeT>
+    requires sampling_scope<ScopeT>
 void
 pause(ScopeT)
 {
-    static_assert(
-        tim::is_one_of<ScopeT,
-                       type_list<scope::thread_scope, scope::process_scope>>::value,
-        "Unsupported scope");
-
     if constexpr(std::is_same<ScopeT, scope::thread_scope>::value)
     {
         if(!_thread_paused) _thread_paused = false;
 
-        bool _paused_v = *_thread_paused;
+        const bool _paused_v = *_thread_paused;
         if(!_paused_v)
         {
             auto& _causal_perf = perf::get_instance(threading::get_id());
@@ -483,7 +480,7 @@ pause(ScopeT)
     {
         if(!_process_paused) _process_paused = false;
 
-        bool _paused_v = *_process_paused;
+        const bool _paused_v = *_process_paused;
         if(!_paused_v)
         {
             for(auto i = 0; i < ROCPROFSYS_MAX_THREADS; ++i)
@@ -498,19 +495,15 @@ pause(ScopeT)
 }
 
 template <typename ScopeT>
+    requires sampling_scope<ScopeT>
 void
 resume(ScopeT)
 {
-    static_assert(
-        tim::is_one_of<ScopeT,
-                       type_list<scope::thread_scope, scope::process_scope>>::value,
-        "Unsupported scope");
-
     if constexpr(std::is_same<ScopeT, scope::thread_scope>::value)
     {
         if(!_thread_paused) _thread_paused = true;
 
-        bool _paused_v = *_thread_paused;
+        const bool _paused_v = *_thread_paused;
         if(_paused_v)
         {
             auto& _causal_perf = perf::get_instance(threading::get_id());
@@ -523,7 +516,7 @@ resume(ScopeT)
     {
         if(!_process_paused) _process_paused = true;
 
-        bool _paused_v = *_process_paused;
+        const bool _paused_v = *_process_paused;
         if(_paused_v)
         {
             for(auto i = 0; i < ROCPROFSYS_MAX_THREADS; ++i)
@@ -564,7 +557,7 @@ unblock_signals(std::set<int> _signals)
 void
 post_process()
 {
-    ROCPROFSYS_SCOPED_THREAD_STATE(ThreadState::Internal);
+    auto _thread_state_guard = state::thread::scoped(state::thread::Internal);
 
     if(get_debug_sampling())
     {
@@ -612,7 +605,7 @@ post_process()
 namespace
 {
 void
-post_process_causal(int64_t, const std::vector<causal_bundle_t>& _data)
+post_process_causal(std::int64_t, const std::vector<causal_bundle_t>& _data)
 {
     for(const auto& itr : _data)
     {

@@ -17,6 +17,11 @@ from .config import (
     discover_build_config,
 )
 
+from .environment import (
+    TestEnvironment,
+    TestEnvKind,
+)
+
 from .runners import (
     TestResult,
     BaselineRunner,
@@ -34,6 +39,7 @@ from .validators import (
     validate_rocpd_database,
     validate_timemory_json,
     validate_causal_json,
+    validate_unified_memory_outputs,
     validate_file_exists,
     validate_regex,
     validate_file_regex,
@@ -54,6 +60,9 @@ __all__ = [
     "RocprofsysConfig",
     "discover_build_config",
     "discover_install_config",
+    # Environment
+    "TestEnvironment",
+    "TestEnvKind",
     # Runners
     "TestResult",
     "BaselineRunner",
@@ -70,6 +79,7 @@ __all__ = [
     "validate_rocpd_database",
     "validate_timemory_json",
     "validate_causal_json",
+    "validate_unified_memory_outputs",
     "validate_file_exists",
     "validate_regex",
     "validate_file_regex",

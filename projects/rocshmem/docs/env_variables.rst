@@ -21,11 +21,11 @@ control the behavior of rocSHMEM.
 
     * - | ``ROCSHMEM_DEBUG_LEVEL``
         | Debug output level
-      - ``WARN``
+      - ``ERROR``
       - | Levels (from least to most verbose):
         | ``NONE``: Suppress all output.
-        | ``ERROR``: Print error messages only.
-        | ``WARN``: Print warnings and errors (default).
+        | ``ERROR``: Print error messages only (default).
+        | ``WARN``: Print warnings and errors.
         | ``ENV``: Print modified environment variables at startup.
         | ``VERSION``: Print build/version information at startup.
         | ``INFO``: Print informational messages and above.
@@ -38,6 +38,16 @@ control the behavior of rocSHMEM.
         | ``:color`` (default) or ``:nocolor`` enables/disables ANSI color output.
         |
         | Examples: ``trace:noversion``, ``env:full``, ``api:noenv``, ``trace:nocolor``
+
+    * - | ``ROCSHMEM_HEAP_ALLOCATOR_TYPE``
+        | Selects the GPU memory allocator used for the symmetric heap.
+      - arch-dependent
+      - | ``uncached``: GPU memory in uncached mode (default on most architectures).
+        | ``finegrained``: Fine-grained coherent GPU memory (default on gfx1100, gfx1201).
+        | ``coarsegrained``: Coarse-grained coherent GPU memory.
+        | ``vmm_posix``: VMM with POSIX fd-based IPC (requires ROCm 7.2+, Linux 5.6+, TCP bootstrap).
+        | ``vmm_fabric``: VMM with fabric handle IPC (requires ROCm 7.14+, gfx1250/MI455 only).
+        | Values are case-insensitive.
 
     * - | ``ROCSHMEM_HEAP_SIZE``
         | Defines the size of the rocSHMEM symmetric heap in bytes (per PE).
@@ -172,6 +182,25 @@ control the behavior of rocSHMEM.
       - ``1``
       - Number of QPs per PE for each user context.
 
+
+    * - | ``ROCSHMEM_GDA_NUM_USER_BUFFERS``
+        | GDA supports ``rocshmem_buffer_register`` and ``rocshmem_buffer_unregister``
+        | for user buffers. This variable sets the number of user buffers an
+        | application may register when using the GDA backend.
+        | If the application uses more user buffers than what is defined with
+        | this variable, then the behavior is undefined.
+      - ``4``
+      - Maximum number of user buffer registrations for GDA
+
+    * - | ``ROCSHMEM_MAX_SYMM_REGIONS``
+        | rocSHMEM supports ``rocshmem_buffer_register_symmetric`` and
+        | ``rocshmem_buffer_unregister_symmetric`` for symmetric user buffers.
+        | This variable sets the maximum number of symmetric user buffers an
+        | application may register concurrently. It is backend-agnostic and is
+        | currently honored by the IPC backend.
+      - ``4``
+      - Maximum number of symmetric user buffer registrations
+
     * - | ``ROCSHMEM_MAX_WF_BUFFERS``
         | Maximum number of wavefront buffer arrays in default context (determines size of status, return, and atomic return buffers)
       - ``1024``
@@ -191,3 +220,38 @@ control the behavior of rocSHMEM.
         | Socket family for bootstrap (AF_UNSPEC, AF_INET, AF_INET6)
       - ``types::socket_family::UNSPEC``
       -
+
+    * - | ``ROCSHMEM_SDMA_ENABLED``
+        | Enable or disable the SDMA transport at runtime (requires ``USE_SDMA`` build option).
+      - ``1``
+      - | ``0``: Disabled. All transfers use GPU load/store (IPC path).
+        | ``1``: Enabled. Transfers at or above ``ROCSHMEM_SDMA_THRESHOLD`` use the SDMA engine.
+
+    * - | ``ROCSHMEM_SDMA_THRESHOLD``
+        | Minimum transfer size in bytes to route through the SDMA engine.
+        | Transfers smaller than this threshold use GPU load/store instead.
+      - ``256``
+      - Size in bytes.
+
+    * - | ``ROCSHMEM_SDMA_NUM_CHANNELS``
+        | Number of SDMA channels (ring buffers) allocated per destination PE.
+        | More channels reduce CAS contention when many wavefronts submit concurrently,
+        | at the cost of additional queue memory and SDMA engine resources.
+      - ``1``
+      - Number of channels per destination PE.
+
+    * - | ``ROCSHMEM_SDMA_SPREAD_CHANNELS``
+        | When enabled, each wavefront within a workgroup selects its SDMA channel
+        | using an offset based on its wavefront index:
+        | ``effective_channel = (ctx_channel + wf_id) % num_channels``.
+        | This reduces CAS contention when multiple wavefronts in the same workgroup
+        | target the same destination PE on a shared context.
+        | By default, spreading is automatically enabled only for the default context
+        | (``ctx_id=0``), which is shared by all workgroups when contexts are not
+        | created per-workgroup. Per-workgroup contexts (created via
+        | ``rocshmem_wg_ctx_create``) already distribute workgroups across channels
+        | via their context ID; enabling spreading for them reshuffles contention
+        | without reducing it.
+      - ``0``
+      - | ``0``: Apply wf_id spreading only for the default (shared) context.
+        | ``1``: Apply wf_id spreading for all contexts.

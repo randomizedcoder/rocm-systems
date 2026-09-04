@@ -8,8 +8,6 @@
 #include "library/thread_info.hpp"
 #include "logger/debug.hpp"
 
-#include <spdlog/fmt/fmt.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -27,8 +25,8 @@ namespace detail
 
 struct cpu_perfetto_sample
 {
-    uint64_t timestamp;
-    metrics  metric_values;
+    std::uint64_t timestamp;
+    metrics       metric_values;
 };
 
 struct cpu_track_set
@@ -95,7 +93,7 @@ struct perfetto_policy
     }
 
     static void store_sample([[maybe_unused]] size_t device_index,
-                             const metrics& metric_values, uint64_t timestamp)
+                             const metrics& metric_values, std::uint64_t timestamp)
     {
         if(detail::get_cpu_samples())
         {

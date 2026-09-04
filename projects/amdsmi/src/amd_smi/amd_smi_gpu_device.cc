@@ -1,36 +1,37 @@
-/*
- * Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- */
+// Copyright Advanced Micro Devices, Inc.
+// SPDX-License-Identifier: MIT
 
 #include "amd_smi/impl/amd_smi_gpu_device.h"
+
+extern "C" {
+#include "ualoe_lib/ualoe_lib.h"
+}
 
 #include <dirent.h>
 #include <sys/types.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cerrno>
+#include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <iterator>
+#include <limits>
+#include <map>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <string_view>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
+#include "amd_smi/impl/amd_smi_common.h"
+#include "amd_smi/impl/amd_smi_fabric_ualink.h"
 #include "amd_smi/impl/amd_smi_utils.h"
 #include "amd_smi/impl/fdinfo.h"
 #include "rocm_smi/rocm_smi_kfd.h"
@@ -41,6 +42,47 @@ namespace amd::smi {
 
 // Constant for KFD context directory prefix
 static constexpr const char* kContextPrefix = "context_";
+
+AMDSmiGPUDevice::AMDSmiGPUDevice(uint32_t gpu_id, std::string path, amdsmi_bdf_t bdf,
+                                 AMDSmiDrm& drm)
+    : AMDSmiProcessor(AMDSMI_PROCESSOR_TYPE_AMD_GPU),
+      gpu_id_(gpu_id),
+      path_(path),
+      bdf_(bdf),
+      drm_(drm) {
+  populate_ifoe_fabric_bdf_list();
+}
+
+AMDSmiGPUDevice::AMDSmiGPUDevice(uint32_t gpu_id, AMDSmiDrm& drm)
+    : AMDSmiProcessor(AMDSMI_PROCESSOR_TYPE_AMD_GPU), gpu_id_(gpu_id), drm_(drm) {
+  if (check_if_drm_is_supported()) this->get_drm_data();
+
+  populate_ifoe_fabric_bdf_list();
+}
+
+// Opens the IFoE/UALoE genl session; deferred (see get_ualoe_handle).
+void AMDSmiGPUDevice::open_ualoe_session() {
+  if (has_ifoe_related_bdf() && device_has_ualink()) {
+    auto ifoe_bdf_str = get_ifoe_bdf_string();
+    if (auto ualoe_status = ualoe_open(ifoe_bdf_str.c_str(), &ualoe_handle_); ualoe_status != 0) {
+      ualoe_handle_ = (-1);
+    }
+  }
+}
+
+ualoe_handle_t AMDSmiGPUDevice::get_ualoe_handle() {
+  std::call_once(ualoe_open_once_, [this]() { open_ualoe_session(); });
+  return ualoe_handle_;
+}
+
+AMDSmiGPUDevice::~AMDSmiGPUDevice() {
+  delete backend_;
+  backend_ = nullptr;
+  if (ualoe_handle_ != -1) {
+    ualoe_close(ualoe_handle_);
+    ualoe_handle_ = -1;
+  }
+}
 
 uint32_t AMDSmiGPUDevice::get_gpu_id() const { return gpu_id_; }
 
@@ -90,6 +132,7 @@ uint64_t AMDSmiGPUDevice::get_kfd_gpu_id() {
 }
 
 std::string& AMDSmiGPUDevice::get_gpu_path() { return path_; }
+const std::string& AMDSmiGPUDevice::get_gpu_path() const { return path_; }
 
 amdsmi_bdf_t AMDSmiGPUDevice::get_bdf() { return this->bdf_; }
 
@@ -106,6 +149,7 @@ amdsmi_status_t AMDSmiGPUDevice::get_drm_data() {
 
   bdf_ = bdf, path_ = path;
   vendor_id_ = drm_.get_vendor_id();
+  populate_ifoe_fabric_bdf_list();
 
   return AMDSMI_STATUS_SUCCESS;
 }
@@ -174,9 +218,13 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
     process_info_cache_map.clear();
 
     status_code = rsmi_compute_process_info_get(nullptr, &cache_ptr->num_running_processes);
-    if ((status_code != rsmi_status_t::RSMI_STATUS_SUCCESS) ||
-        (cache_ptr->num_running_processes <= 0)) {
-      return status_code;
+    if (status_code != rsmi_status_t::RSMI_STATUS_SUCCESS) {
+      return static_cast<int32_t>(status_code);
+    }
+    if (cache_ptr->num_running_processes <= 0) {
+      compute_process_list.clear();
+      cache_ptr->last_compute_process_list_update_time = std::chrono::steady_clock::now();
+      return static_cast<int32_t>(status_code);
     }
 
     /**
@@ -191,10 +239,12 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
     status_code = rsmi_compute_process_info_get(cache_ptr->list_all_processes_ptr.get(),
                                                 &cache_ptr->num_running_processes);
     if (status_code != rsmi_status_t::RSMI_STATUS_SUCCESS) {
-      return status_code;
+      return static_cast<int32_t>(status_code);
     }
 
     if (cache_ptr->num_running_processes <= 0) {
+      compute_process_list.clear();
+      cache_ptr->last_compute_process_list_update_time = std::chrono::steady_clock::now();
       return rsmi_status_t::RSMI_STATUS_SUCCESS;  // No processes running
     }
 
@@ -208,7 +258,7 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
   auto list_device_allocation_size = uint32_t(0);
   status_code = rsmi_num_monitor_devices(&num_running_devices);
   if ((status_code != rsmi_status_t::RSMI_STATUS_SUCCESS) || (num_running_devices <= 0)) {
-    return status_code;
+    return static_cast<int32_t>(status_code);
   }
 
   /**
@@ -216,11 +266,29 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
    * This function retrieves the process information given in rsmi_proc_info_t
    * and populates the amdsmi_proc_info_t structure.
    */
+  // This device's KFD gpu id is stable for the whole process sweep, so resolve
+  // it once and reuse it for every process instead of recomputing it per
+  // process. It is forwarded to gpuvsmi_get_pid_info() so the per-process KFD
+  // lookup can skip rebuilding the entire KFD topology just to translate the
+  // BDF into this id.
+  const uint64_t kfd_gpu_id = get_kfd_gpu_id();
+  if (kfd_gpu_id == 0 || kfd_gpu_id == UINT64_MAX) {
+    // Without a cached id every per-process lookup falls back to a full KFD
+    // topology discovery (an expensive sysfs walk). Surface it once per device
+    // per sweep so the slow path is observable rather than silently degrading.
+    std::ostringstream ss;
+    ss << __PRETTY_FUNCTION__
+       << " | KFD gpu id unavailable for this device; per-process lookups will "
+          "fall back to full KFD topology discovery.";
+    LOG_WARN(ss);
+  }
+
   auto get_process_info = [&](const rsmi_process_info_t& rsmi_proc_info,
                               amdsmi_proc_info_t& amdsmi_proc_info) {
-    // amdsmi_proc_info_t gets populated with /proc information from gpuvsmi_get_pid_info()
-
-    auto status_code = gpuvsmi_get_pid_info(get_bdf(), rsmi_proc_info.process_id, amdsmi_proc_info);
+    // Pass this device's cached KFD gpu id (resolved once above) so the
+    // per-process lookup need not rebuild the KFD topology to derive it.
+    auto status_code =
+        gpuvsmi_get_pid_info(get_bdf(), rsmi_proc_info.process_id, amdsmi_proc_info, kfd_gpu_id);
     // If we cannot get the info from sysfs, save the minimum info
     if (status_code != amdsmi_status_t::AMDSMI_STATUS_SUCCESS) {
       amdsmi_proc_info.pid = rsmi_proc_info.process_id;
@@ -233,7 +301,6 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
     amdsmi_proc_info.sdma_usage = rsmi_proc_info.sdma_usage;
 
     // Safely handle KFD processes to get total memory_usage of the process
-    uint64_t kfd_gpu_id = get_kfd_gpu_id();
     std::string kfd_proc_path =
         "/sys/class/kfd/kfd/proc/" + std::to_string(rsmi_proc_info.process_id);
     std::string kfd_vram_file = "/vram_" + std::to_string(kfd_gpu_id);
@@ -321,7 +388,7 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
       amdsmi_proc_info.mem = total_vram;
     }
 
-    return status_code;
+    return static_cast<int32_t>(status_code);
   };
 
   /**
@@ -376,7 +443,7 @@ int32_t AMDSmiGPUDevice::get_compute_process_list_impl(
     }
   }
 
-  return status_code;
+  return static_cast<int32_t>(status_code);
 }
 
 const GPUComputeProcessList_t& AMDSmiGPUDevice::amdgpu_get_compute_process_list(
@@ -400,6 +467,32 @@ std::string AMDSmiGPUDevice::bdf_to_string() const {
   return oss.str();
 }
 
+void AMDSmiGPUDevice::parse_cpulist(const std::string& cpulist, std::vector<uint64_t>& bitmask) {
+  if (bitmask.empty()) return;
+  const size_t highest = bitmask.size() * 64 - 1;
+
+  std::istringstream sstr(cpulist);
+  std::string range;
+  while (std::getline(sstr, range, ',')) {
+    size_t first = 0;
+    size_t last = 0;
+    try {
+      const size_t hyphen = range.find('-');
+      const long lo = std::stol(range.substr(0, hyphen));
+      const long hi = (hyphen == std::string::npos) ? lo : std::stol(range.substr(hyphen + 1));
+      if (lo < 0 || hi < 0) continue;
+      first = static_cast<size_t>(lo);
+      last = static_cast<size_t>(hi);
+    } catch (const std::exception&) {
+      continue;
+    }
+    // Clamp rather than skip, so an over-large range keeps the CPUs that fit.
+    for (size_t i = first; i <= std::min(last, highest); ++i) {
+      bitmask[i / 64] |= (1ULL << (i % 64));
+    }
+  }
+}
+
 std::vector<uint64_t> AMDSmiGPUDevice::get_bitmask_from_numa_node(int32_t node_id,
                                                                   uint32_t size) const {
   std::vector<uint64_t> bitmask(size, 0);
@@ -415,21 +508,7 @@ std::vector<uint64_t> AMDSmiGPUDevice::get_bitmask_from_numa_node(int32_t node_i
   if (file.is_open()) {
     std::string info;
     while (std::getline(file, info)) {
-      std::istringstream sstr(info);
-      std::string node_cpus;
-      while (std::getline(sstr, node_cpus, ',')) {
-        size_t hyphen = node_cpus.find('-');
-        if (hyphen != std::string::npos) {
-          int start = std::stoi(node_cpus.substr(0, hyphen));
-          int end = std::stoi(node_cpus.substr(hyphen + 1));
-          for (int i = start; i <= end; ++i) {
-            bitmask[i / 64] |= (1ULL << (i % 64));
-          }
-        } else {
-          int core = std::stoi(node_cpus);
-          bitmask[core / 64] |= (1ULL << (core % 64));
-        }
-      }
+      parse_cpulist(info, bitmask);
     }
   }
   return bitmask;
@@ -450,24 +529,484 @@ std::vector<uint64_t> AMDSmiGPUDevice::get_bitmask_from_local_cpulist(uint32_t d
   if (file.is_open()) {
     std::string info;
     while (std::getline(file, info)) {
-      std::istringstream sstr(info);
-      std::string node_cpus;
-      while (std::getline(sstr, node_cpus, ',')) {
-        size_t hyphen = node_cpus.find('-');
-        if (hyphen != std::string::npos) {
-          int start = std::stoi(node_cpus.substr(0, hyphen));
-          int end = std::stoi(node_cpus.substr(hyphen + 1));
-          for (int i = start; i <= end; ++i) {
-            bitmask[i / 64] |= (1ULL << (i % 64));
-          }
-        } else {
-          int core = std::stoi(node_cpus);
-          bitmask[core / 64] |= (1ULL << (core % 64));
-        }
-      }
+      parse_cpulist(info, bitmask);
     }
   }
   return bitmask;
+}
+
+namespace gpu_device::details {
+
+using UALoeLinkTypeMap_t = std::map<std::string_view, amdsmi_fabric_type_t>;
+inline const auto UALoeLinkTypeMap =
+    UALoeLinkTypeMap_t{{"ualoe", amdsmi_fabric_type_t::AMDSMI_FABRIC_TYPE_UALOE},
+                       {"ualink", amdsmi_fabric_type_t::AMDSMI_FABRIC_TYPE_UALINK}};
+
+using UALoeAcceleratorStateTypeMap_t =
+    std::map<std::string_view, amdsmi_fabric_accelerator_vpod_state_t>;
+inline const auto UALoeAcceleratorStateTypeMap = UALoeAcceleratorStateTypeMap_t{
+    {"unconfigured",
+     amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_UNCONFIGURED},
+    {"configured",
+     amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_CONFIGURED},
+    {"ready", amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_READY},
+    {"active", amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_ACTIVE},
+    {"error", amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_ERROR}};
+
+auto log_ualoe_file_info(std::ostringstream&& log_stream_info) -> void {
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " Log stream: |";
+  outstream << log_stream_info.str();
+  LOG_DEBUG(outstream);
+}
+
+// Set values based on link info type
+auto get_fabric_type(const std::string& link_value, amdsmi_fabric_info_v2_t& local_fabric_info)
+    -> void {
+  // Convert the string to lowercase
+  auto fabric_type_str = link_value;
+  std::transform(fabric_type_str.begin(), fabric_type_str.end(), fabric_type_str.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+  const auto fabric_type_sv = std::string_view{fabric_type_str};
+  if (auto fabric_type_itr = UALoeLinkTypeMap.find(fabric_type_sv);
+      fabric_type_itr != UALoeLinkTypeMap.end()) {
+    local_fabric_info.fabric_type = fabric_type_itr->second;
+  } else {
+    local_fabric_info.fabric_type = amdsmi_fabric_type_t::AMDSMI_FABRIC_TYPE_UNKNOWN;
+  }
+
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " | Link value: " << link_value << " -> " << fabric_type_str
+            << " | fabric_type: " << local_fabric_info.fabric_type << " |";
+  log_ualoe_file_info(std::move(outstream));
+}
+
+auto parse_accel_state_from_sysfs_line(const std::string& link_value)
+    -> amdsmi_fabric_accelerator_vpod_state_t {
+  auto accel_state =
+      amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_UNKNOWN;
+  auto accel_state_str = link_value;
+  std::transform(accel_state_str.begin(), accel_state_str.end(), accel_state_str.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+  const auto accel_state_sv = std::string_view{accel_state_str};
+  if (auto accel_state_itr = UALoeAcceleratorStateTypeMap.find(accel_state_sv);
+      accel_state_itr != UALoeAcceleratorStateTypeMap.end()) {
+    return accel_state_itr->second;
+  }
+
+  return accel_state;
+}
+
+auto get_accel_state(const std::string& link_value, amdsmi_fabric_info_v2_t& local_fabric_info)
+    -> void {
+  local_fabric_info.accel_state = parse_accel_state_from_sysfs_line(link_value);
+
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " | Link value: " << link_value
+            << " | accel_state: " << local_fabric_info.accel_state << " |";
+  log_ualoe_file_info(std::move(outstream));
+}
+
+auto read_fabric_info_file(const std::string& sysfs_file_path,
+                           UALoeLinkInfoLines_t& sysfs_file_lines) -> amdsmi_status_t {
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " | ======= start =======";
+  LOG_TRACE(outstream);
+
+  auto status_code(amdsmi_status_t::AMDSMI_STATUS_SUCCESS);
+  std::ifstream ualoe_file(sysfs_file_path);
+  if (!ualoe_file.is_open()) {
+    auto rsmi_status = amd::smi::ErrnoToRsmiStatus(errno);
+    errno = 0;
+    outstream << __PRETTY_FUNCTION__ << " | Failed to read SYSFS file: " << sysfs_file_path
+              << " | Error: " << rsmi_status << " (" << amd::smi::getRSMIStatusString(rsmi_status)
+              << ")";
+    LOG_DEBUG(outstream);
+    status_code = amd::smi::rsmi_to_amdsmi_status(rsmi_status);
+    return status_code;
+  }
+
+  /*
+   *  Read all lines from the ualoe file into a vector
+   *  For most files we only have a single line, but we have exceptions (e.g. vpod_active_accels)
+   */
+  auto ualoe_file_line = UALoeLinkInfoLine_t();
+  while (std::getline(ualoe_file, ualoe_file_line)) {
+    ualoe_file_line = amd::smi::trim(ualoe_file_line);
+    if (!ualoe_file_line.empty()) {
+      sysfs_file_lines.push_back(ualoe_file_line);
+    }
+  }
+
+  outstream << __PRETTY_FUNCTION__ << " | Read SYSFS file: " << sysfs_file_path
+            << " | Lines: " << sysfs_file_lines.size() << " |";
+  LOG_TRACE(outstream);
+
+  if (sysfs_file_lines.empty()) {
+    status_code = amdsmi_status_t::AMDSMI_STATUS_NO_DATA;
+  }
+
+  return status_code;
+}
+
+/*
+ *  Scan "/sys/bus/pci/drivers/ifoe/" for PCI device symlink names (BDF form)
+ *  For entries where the domain, bus, and device match gpu_bdf (same physical PCIe device / slot;
+ *  any function), are inserted into fabric_bdf_list with the full BDF including function from sysfs
+ */
+auto populate_ifoe_fabric_bdf_list(const amdsmi_bdf_t& gpu_bdf, FabricBDFList_t& fabric_bdf_list)
+    -> amdsmi_status_t {
+  auto status_code = amdsmi_status_t::AMDSMI_STATUS_SUCCESS;
+
+  const auto ifoe_driver_directory = std::filesystem::path{kIFOE_DRIVER_BASE_PATH};
+  std::error_code err_code;
+  if (!std::filesystem::exists(ifoe_driver_directory, err_code) ||
+      !std::filesystem::is_directory(ifoe_driver_directory, err_code)) {
+    status_code = amdsmi_status_t::AMDSMI_STATUS_DIRECTORY_NOT_FOUND;
+    return status_code;
+  }
+
+  fabric_bdf_list.clear();
+  const auto dir_itr = std::filesystem::directory_iterator{
+      ifoe_driver_directory, std::filesystem::directory_options::skip_permission_denied, err_code};
+  if (err_code) {
+    status_code = amdsmi_status_t::AMDSMI_STATUS_FILE_ERROR;
+    return status_code;
+  }
+
+  for (const auto& entry : dir_itr) {
+    const auto entry_name = entry.path().filename().string();
+    const auto parsed_bdf = from_cstring_to_bdf(entry_name.c_str());
+    if (!parsed_bdf.has_value()) {
+      continue;
+    }
+
+    const auto& parsed_bdf_value = parsed_bdf.value();
+    if ((parsed_bdf_value.domain_number == gpu_bdf.domain_number) &&
+        (parsed_bdf_value.bus_number == gpu_bdf.bus_number) &&
+        (parsed_bdf_value.device_number == gpu_bdf.device_number)) {
+      fabric_bdf_list.insert(parsed_bdf_value);
+    }
+  }
+
+  return status_code;
+}
+
+/*
+ *  Additive fields come out of amdsmi_fabric_info_v2_t::reserved, never off the end, so this size
+ *  must not move again. Asserted here rather than in the public header so consumers pay nothing
+ *  for it, and unconditionally rather than in the tests, which are an opt-in build
+ */
+constexpr auto kFabricInfoV2Size = std::size_t{480};
+static_assert(sizeof(amdsmi_fabric_info_v2_t) == kFabricInfoV2Size,
+              "amdsmi_fabric_info_v2_t size is frozen; grow it by carving from reserved");
+
+/*
+ *  Project the version 2 payload onto the frozen version 1 layout. The station data and
+ *  local_accelerator_count have no version 1 equivalent and are dropped
+ */
+auto flatten_v2_to_v1(const amdsmi_fabric_info_v2_t& source, amdsmi_fabric_info_v1_t& destination)
+    -> void {
+  destination.accelerator_id = source.ppod.accelerator_id;
+  destination.fabric_type = source.fabric_type;
+  destination.bandwidth = source.ppod.bandwidth;
+  destination.latency = source.ppod.latency;
+  std::copy(std::begin(source.ppod.ppod_id), std::end(source.ppod.ppod_id),
+            std::begin(destination.ppod_id));
+  destination.ppod_size = source.ppod.ppod_size;
+  destination.vpod_id = source.vpod.vpod_id;
+  destination.vpod_size = source.vpod.vpod_size;
+  std::copy(std::begin(source.vpod.vpod_active_accelerators),
+            std::end(source.vpod.vpod_active_accelerators),
+            std::begin(destination.vpod_active_accelerators));
+  std::copy(std::begin(source.ppod.local_accelerators), std::end(source.ppod.local_accelerators),
+            std::begin(destination.local_accelerators));
+  destination.addr_mode = source.vpod.addr_mode;
+  destination.accel_state = source.accel_state;
+}
+
+/*
+ *  Bounded write into caller memory: a caller that did not request version 2 only allocated
+ *  through the version 1 union member, so no byte past it may be touched. Any unrecognized
+ *  requested_version takes the narrow path rather than erroring, so a caller predating the
+ *  selector keeps working
+ *
+ *  Match the version exactly; never rank the values and take the highest supported one at or
+ *  below the request. The version 1 path stamps AMDSMI_FABRIC_INFO_VERSION_1 below (per the
+ *  public header doc: "On output, info->fabric_version reports the member filled"), so a
+ *  caller that checks the output against AMDSMI_FABRIC_INFO_VERSION_1 sees a match rather
+ *  than a sentinel that never equals either documented constant
+ */
+auto publish_fabric_info(const amdsmi_bdf_t& fabric_bdf, const amdsmi_fabric_info_v2_t& source,
+                         std::uint32_t requested_version, amdsmi_fabric_info_t& destination)
+    -> void {
+  destination.bdf = fabric_bdf;
+
+  if (requested_version == static_cast<std::uint32_t>(AMDSMI_FABRIC_INFO_VERSION_2)) {
+    destination.fabric_version = static_cast<std::uint32_t>(AMDSMI_FABRIC_INFO_VERSION_2);
+    destination.fabric_info.v2 = source;
+    return;
+  }
+
+  destination.fabric_version = static_cast<std::uint32_t>(AMDSMI_FABRIC_INFO_VERSION_1);
+  flatten_v2_to_v1(source, destination.fabric_info.v1);
+}
+
+}  // namespace gpu_device::details
+
+auto AMDSmiGPUDevice::populate_ifoe_fabric_bdf_list() -> void {
+  static_cast<void>(gpu_device::details::populate_ifoe_fabric_bdf_list(bdf_, fabric_bdf_list_));
+
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " | ======= start =======";
+  LOG_DEBUG(outstream);
+
+  if (fabric_bdf_list_.empty()) {
+    // No IFoE driver loaded or no matching BDF: UALoE open will be skipped
+    // and fabric queries will report NOT_SUPPORTED. Surface the reason at
+    // INFO so the contract is visible without enabling debug logging.
+    outstream << __PRETTY_FUNCTION__ << " | No IFoE BDF found under " << kIFOE_DRIVER_BASE_PATH
+              << " matching GPU BDF " << stringify_bdf(bdf_)
+              << " | UALoE access disabled for this device";
+    LOG_INFO(outstream);
+    return;
+  }
+
+  outstream << __PRETTY_FUNCTION__ << " | fabric_bdf_list_size: " << fabric_bdf_list_.size()
+            << " |";
+  auto first_bdf = true;
+  for (const auto& fabric_bdf : fabric_bdf_list_) {
+    if (!first_bdf) {
+      outstream << ", ";
+    }
+    first_bdf = false;
+    outstream << stringify_bdf(fabric_bdf);
+  }
+
+  outstream << " |";
+  LOG_DEBUG(outstream);
+}
+
+auto AMDSmiGPUDevice::has_ifoe_related_bdf() const -> bool { return (!fabric_bdf_list_.empty()); }
+
+auto AMDSmiGPUDevice::get_ifoe_bdf_string() const -> std::string {
+  if (has_ifoe_related_bdf()) {
+    auto ifoe_bdf = *fabric_bdf_list_.begin();
+    return stringify_bdf(ifoe_bdf);
+  }
+
+  return {};
+}
+
+auto AMDSmiGPUDevice::get_ualink_directory_path() const -> std::string {
+  return std::string(kUALOE_BASE_PATH) + get_gpu_path() + std::string(kUALOE_UALINK_DIRECTORY);
+}
+
+// Check if this GPU device has ualink sysfs directory (required for UALOE)
+bool AMDSmiGPUDevice::device_has_ualink() const {
+  if (!has_ifoe_related_bdf()) {
+    return false;
+  }
+
+  std::error_code err_code;
+  return std::filesystem::is_directory(std::filesystem::path(get_ualink_directory_path()),
+                                       err_code);
+}
+
+auto AMDSmiGPUDevice::get_fabric_info_from_ualoe(amdsmi_fabric_info_t& fabric_info,
+                                                 UALoeLinkInfo_t link_info_type) const
+    -> amdsmi_status_t {
+  std::ostringstream outstream;
+  outstream << __PRETTY_FUNCTION__ << " | ======= start =======";
+  LOG_TRACE(outstream);
+
+  /**
+   *    The layout the caller asked for, captured before anything is written back. Reading it
+   *    after the first store would see our own output
+   */
+  const auto requested_version = fabric_info.fabric_version;
+
+  const auto fabric_bdf = (has_ifoe_related_bdf() ? *fabric_bdf_list_.begin() : bdf_);
+
+  /**
+   *    Always gather into the widest layout; publish_fabric_info() narrows it to whatever the
+   *    caller allocated
+   */
+  auto v2 = amdsmi_fabric_info_v2_t{};
+
+  /**
+   *    Flat surface: owned by this reader (fabric_type + accel_state).
+   *    Both start at their sentinel and are overwritten only when the corresponding flat file
+   *    yields usable content
+   */
+  v2.fabric_type = amdsmi_fabric_type_t::AMDSMI_FABRIC_TYPE_UNKNOWN;
+  v2.accel_state =
+      amdsmi_fabric_accelerator_vpod_state_t::AMDSMI_FABRIC_ACCELERATOR_VPOD_STATE_UNKNOWN;
+
+  /**
+   *    Ppod/Vpod/Station payloads: sentinel-init here so a subtree that is absent (its
+   *    'query_fabric_*_config()' returns NOT_SUPPORTED) leaves documented sentinels
+   *
+   *    When a subtree is present the reader re-applies these same sentinels for fields it cannot
+   *    read, so the copy below is authoritative.
+   */
+  v2.ppod.accelerator_id = std::numeric_limits<decltype(v2.ppod.accelerator_id)>::max();
+  std::fill(std::begin(v2.ppod.ppod_id), std::end(v2.ppod.ppod_id),
+            static_cast<std::uint8_t>(0x99));
+  v2.ppod.ppod_size = std::numeric_limits<decltype(v2.ppod.ppod_size)>::max();
+  std::fill(std::begin(v2.ppod.local_accelerators), std::end(v2.ppod.local_accelerators),
+            std::numeric_limits<std::uint32_t>::max());
+  v2.ppod.local_accelerator_count = 0;
+  v2.ppod.bandwidth = std::numeric_limits<decltype(v2.ppod.bandwidth)>::max();
+  v2.ppod.latency = std::numeric_limits<decltype(v2.ppod.latency)>::max();
+
+  v2.vpod.vpod_id = std::numeric_limits<decltype(v2.vpod.vpod_id)>::max();
+  v2.vpod.vpod_size = std::numeric_limits<decltype(v2.vpod.vpod_size)>::max();
+  std::fill(std::begin(v2.vpod.vpod_active_accelerators),
+            std::end(v2.vpod.vpod_active_accelerators), std::numeric_limits<std::uint32_t>::max());
+  v2.vpod.addr_mode = amdsmi_fabric_npa_address_mode_t::AMDSMI_FABRIC_NPA_ADDRESS_MODE_UNKNOWN;
+
+  v2.station.station_flags = std::numeric_limits<decltype(v2.station.station_flags)>::max();
+  v2.station.num_stations = std::numeric_limits<decltype(v2.station.num_stations)>::max();
+  std::fill(std::begin(v2.station.lane_en_bitmap), std::end(v2.station.lane_en_bitmap),
+            static_cast<std::uint8_t>(0));
+
+  /**
+   * Check if the 'ualink' directory exists in the sysfs path, if not, return
+   * AMDSMI_STATUS_NOT_SUPPORTED. Use get_gpu_path() (the DRM card directory name resolved via
+   * libdrm), matching the convention used elsewhere in the codebase (see amd_smi_utils.cc). gpu_id_
+   * is the AMDSMI processor index and is not guaranteed to equal the DRM card index when devices
+   * are gapped or filtered.
+   */
+  const auto ualink_directory = get_ualink_directory_path();
+  const auto ualink_directory_path = std::filesystem::path(ualink_directory);
+
+  outstream << __PRETTY_FUNCTION__ << " | gpu_path: " << get_gpu_path()
+            << " | ualink_directory_path: " << ualink_directory_path
+            << " | ualink_directory: " << ualink_directory << " |";
+  LOG_DEBUG(outstream);
+
+  std::error_code err_code;
+  if (!std::filesystem::is_directory(ualink_directory_path, err_code)) {
+    outstream << __PRETTY_FUNCTION__
+              << " | UALOE sysfs not present: " << ualink_directory_path.string()
+              << " | returning AMDSMI_STATUS_NOT_SUPPORTED";
+    LOG_DEBUG(outstream);
+    gpu_device::details::publish_fabric_info(fabric_bdf, v2, requested_version, fabric_info);
+    return amdsmi_status_t::AMDSMI_STATUS_NOT_SUPPORTED;
+  }
+
+  /**
+   *    Flat surface: (fabric_type + accel_state only). UALoeLinkInfoMap is trimmed to these two
+   *    The Ppod/Vpod/Station payloads come from the subtree readers below, not from here
+   */
+  auto flat_files_with_usable_content = std::size_t(0);
+  for (const auto& [link_info_type_key, link_info_file_value] : UALoeLinkInfoMap) {
+    if ((link_info_type != UALoeLinkInfo_t::ALL_LINK_INFO) &&
+        (link_info_type_key != link_info_type)) {
+      continue;
+    }
+
+    const auto sysfs_file_path = (ualink_directory + "/" + std::string(link_info_file_value));
+    auto ualoe_file_lines = UALoeLinkInfoLines_t{};
+    const auto read_status =
+        gpu_device::details::read_fabric_info_file(sysfs_file_path, ualoe_file_lines);
+    if (ualoe_file_lines.empty()) {
+      outstream << __PRETTY_FUNCTION__
+                << " | Skipping sysfs file (no usable content): " << sysfs_file_path
+                << " | read_status: " << read_status << " |";
+      LOG_DEBUG(outstream);
+      continue;
+    }
+
+    ++flat_files_with_usable_content;
+    for (const auto& link_value : ualoe_file_lines) {
+      switch (link_info_type_key) {
+        case UALoeLinkInfo_t::LINK_TYPE:
+          gpu_device::details::get_fabric_type(link_value, v2);
+          break;
+
+        case UALoeLinkInfo_t::ACCEL_STATE:
+          gpu_device::details::get_accel_state(link_value, v2);
+          break;
+
+        default:
+          break;
+      }
+    }
+  }
+
+  /**
+   *    Ppod/Vpod/Station: read from the flat surface, which is what the driver syncs to after a
+   *    successful commit. The setup/config/stations subtrees stage pending setter writes, so
+   *    reporting them here would return values that are not yet in effect.
+   *
+   *    Each read returns AMDSMI_STATUS_SUCCESS, AMDSMI_STATUS_NO_DATA or
+   *    AMDSMI_STATUS_NOT_SUPPORTED. On anything but AMDSMI_STATUS_NOT_SUPPORTED its data payload
+   *    (sentinels plus populated fields) and the mask of fields actually read are copied into the
+   *    info struct.
+   *
+   *    device_supports_ualink is passed as true because the ualink directory check above already
+   *    established it; going through device_has_ualink() would additionally demand an IFoE BDF and
+   *    lock out devices this function otherwise serves.
+   *
+   *    These device-level queries assume the per-GPU mutex is already held by the API entry point
+   */
+  auto is_any_plane_success = false;
+  auto ppod_cfg = amdsmi_fabric_ppod_config_t{};
+  ppod_cfg.version = AMDSMI_FABRIC_PPOD_CONFIG_V1;
+  ppod_cfg.mask = (AMDSMI_FABRIC_PPOD_FIELD_ACCEL_ID | AMDSMI_FABRIC_PPOD_FIELD_PPOD_ID |
+                   AMDSMI_FABRIC_PPOD_FIELD_PPOD_SIZE | AMDSMI_FABRIC_PPOD_FIELD_LOCAL_ACCELS |
+                   AMDSMI_FABRIC_PPOD_FIELD_BANDWIDTH | AMDSMI_FABRIC_PPOD_FIELD_LATENCY);
+  const auto ppod_status = fabric_ualink::query_ppod_config_at(ualink_directory, true, ppod_cfg,
+                                                               kUALOE_UALINK_FLAT_SUBDIR);
+  if (ppod_status != amdsmi_status_t::AMDSMI_STATUS_NOT_SUPPORTED) {
+    v2.ppod = ppod_cfg.data;
+    v2.ppod_mask = ppod_cfg.mask;
+  }
+  is_any_plane_success =
+      (is_any_plane_success || (ppod_status == amdsmi_status_t::AMDSMI_STATUS_SUCCESS));
+
+  auto vpod_cfg = amdsmi_fabric_vpod_config_t{};
+  vpod_cfg.version = AMDSMI_FABRIC_VPOD_CONFIG_V1;
+  vpod_cfg.mask =
+      (AMDSMI_FABRIC_VPOD_FIELD_VPOD_ID | AMDSMI_FABRIC_VPOD_FIELD_VPOD_SIZE |
+       AMDSMI_FABRIC_VPOD_FIELD_VPOD_ACTIVE_ACCELS | AMDSMI_FABRIC_VPOD_FIELD_ADDR_MODE);
+  const auto vpod_status = fabric_ualink::query_vpod_config_at(ualink_directory, true, vpod_cfg,
+                                                               kUALOE_UALINK_FLAT_SUBDIR);
+  if (vpod_status != amdsmi_status_t::AMDSMI_STATUS_NOT_SUPPORTED) {
+    v2.vpod = vpod_cfg.data;
+    v2.vpod_mask = vpod_cfg.mask;
+  }
+  is_any_plane_success =
+      (is_any_plane_success || (vpod_status == amdsmi_status_t::AMDSMI_STATUS_SUCCESS));
+
+  auto station_cfg = amdsmi_fabric_station_config_t{};
+  station_cfg.version = AMDSMI_FABRIC_STATION_CONFIG_V1;
+  station_cfg.mask = (AMDSMI_FABRIC_DF_FIELD_STATION_FLAGS | AMDSMI_FABRIC_DF_FIELD_LANE_EN_BITMAP |
+                      AMDSMI_FABRIC_DF_FIELD_NUM_STATIONS);
+  const auto station_status = fabric_ualink::query_station_config_at(
+      ualink_directory, true, station_cfg, kUALOE_UALINK_FLAT_SUBDIR);
+  if (station_status != amdsmi_status_t::AMDSMI_STATUS_NOT_SUPPORTED) {
+    v2.station = station_cfg.data;
+    v2.station_mask = station_cfg.mask;
+  }
+  is_any_plane_success =
+      (is_any_plane_success || (station_status == amdsmi_status_t::AMDSMI_STATUS_SUCCESS));
+
+  gpu_device::details::publish_fabric_info(fabric_bdf, v2, requested_version, fabric_info);
+
+  /**
+   *    Driver contract: a present sysfs file means the feature is supported; a
+   *    present-but-empty IFoE file means supported-but-unconfigured.
+   *    File presence alone can't tell the two apart, so an unconfigured device still reads as
+   *    SUCCESS and accel_state in fabric_info is what reports it.
+   */
+  return (((flat_files_with_usable_content > 0) || is_any_plane_success)
+              ? amdsmi_status_t::AMDSMI_STATUS_SUCCESS
+              : amdsmi_status_t::AMDSMI_STATUS_NO_DATA);
 }
 
 }  // namespace amd::smi

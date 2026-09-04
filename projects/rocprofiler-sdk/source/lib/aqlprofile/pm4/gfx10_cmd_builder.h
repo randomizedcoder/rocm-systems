@@ -45,6 +45,11 @@ private:
 public:
     Gfx10CmdBuilder(const reg_base_offset_table* _table)
     : CmdBuilder(_table){};
+
+    // The uint32_t override below hides the base's other BuildCopyRegDataPacket
+    // overloads, re-expose them
+    using CmdBuilder::BuildCopyRegDataPacket;
+
     static constexpr bool IsPrivilegedConfigReg(uint32_t addr)
     {
         return ((addr >= CONFIG_SPACE_START) && (addr <= CONFIG_SPACE_END));
@@ -86,7 +91,7 @@ public:
         uint32_t dword3 = PACKET3_ACQUIRE_MEM__COHER_SIZE((uint32_t(size)));
         uint32_t dword4 = PACKET3_ACQUIRE_MEM__COHER_SIZE_HI((uint32_t(size >> 32)));
 
-        // Specify the poll interval for determing if operation is complete
+        // Specify the poll interval for determining if operation is complete
         uint32_t dword7 = PACKET3_ACQUIRE_MEM__POLL_INTERVAL(0x10);
 
         // Program GCR Control Register. Initialize L2 Cache flush
@@ -306,18 +311,18 @@ public:
                                            : BuildWriteUConfigRegPacket(cmdbuf, addr, value);
     }
 
-    uint32_t BuildCopyCounterDataPacket(CmdBuffer*  cmdbuf,
-                                        uint64_t    src_reg_addr_lo,
-                                        uint64_t    src_reg_addr_hi,
-                                        const void* dst_addr,
-                                        uint32_t    dw_mask)
+    uint32_t BuildCopyCounterDataPacket(CmdBuffer*      cmdbuf,
+                                        uint64_t        src_reg_addr_lo,
+                                        uint64_t        src_reg_addr_hi,
+                                        const uint32_t* dst_addr,
+                                        uint32_t        dw_mask)
     {
         uint32_t read_counter = 0;
         if(dw_mask & 0x1)
         {
             BuildCopyRegDataPacket(cmdbuf,
                                    src_reg_addr_lo,
-                                   (uint32_t*) dst_addr + read_counter,
+                                   dst_addr + read_counter,
                                    PACKET3_COPY_DATA__COUNT_SEL__32_BITS_OF_DATA,
                                    false);
             ++read_counter;
@@ -326,7 +331,7 @@ public:
         {
             BuildCopyRegDataPacket(cmdbuf,
                                    src_reg_addr_hi,
-                                   (uint32_t*) dst_addr + read_counter,
+                                   dst_addr + read_counter,
                                    PACKET3_COPY_DATA__COUNT_SEL__32_BITS_OF_DATA,
                                    false);
             ++read_counter;
@@ -435,7 +440,7 @@ public:
     void BuildCopyCounterDataPacket(CmdBuffer*      cmd,
                                     const Register& reg_lo,
                                     const Register& reg_hi,
-                                    const void*     dst_addr,
+                                    const uint32_t* dst_addr,
                                     uint32_t        mask)
     {
         BuildCopyCounterDataPacket(cmd,

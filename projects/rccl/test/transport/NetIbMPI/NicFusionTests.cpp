@@ -6,7 +6,13 @@
 
 #include "NetIbMPITestBase.hpp"
 
+#include <chrono>
+#include <cstddef>
+
 #ifdef MPI_TESTS_ENABLED
+
+// Deadline for the vNIC accept/connect poll loops in this file.
+static constexpr int kConnectPollTimeoutSec = 30;
 
 // Virtual Device Tests
 
@@ -55,6 +61,185 @@ TEST_F(NetIbMPITest, MakeVirtualDeviceInvalidProps) {
     int vdev = -1;
     ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
     EXPECT_EQ(result, ncclInvalidUsage) << "Should fail with zero devices";
+}
+
+TEST_F(NetIbMPITest, MakeVirtualDeviceNegativeNdevs) {
+    // A negative count clears every per-device check, because the build loop never runs.
+    // Without an explicit bound it registers a vNIC with no constituent device.
+    ASSERT_TRUE(validateTestPrerequisites(kMinProcessesForMPI, MPITestConstants::kNoProcessLimit,
+                                         kRequirePowerOfTwo, 1, kNoNodeLimit))
+        << "Test requirements not met";
+
+    int ndev = 0;
+    AssertInitAndGetDevices(&ndev);
+
+    int ndevBefore = 0;
+    ASSERT_EQ(GetDeviceCount(&ndevBefore), ncclSuccess);
+
+    ncclNetVDeviceProps_t vProps;
+    memset(&vProps, 0, sizeof(vProps));
+    vProps.ndevs = -1;
+
+    int vdev = -1;
+    EXPECT_EQ(MakeVirtualDevice(&vdev, &vProps), ncclInvalidUsage)
+        << "Should fail with a negative device count";
+
+    int ndevAfter = 0;
+    ASSERT_EQ(GetDeviceCount(&ndevAfter), ncclSuccess);
+    EXPECT_EQ(ndevAfter, ndevBefore) << "A rejected request must not register a device";
+}
+
+TEST_F(NetIbMPITest, MakeVirtualDeviceMergeDisabled) {
+    // A multi-device merge must be rejected when NIC merging is disabled.
+    // Requires NCCL_IB_MERGE_NICS=0 (config default is 1) so GTEST_SKIP otherwise.
+    const char* mergeEnv = getenv("NCCL_IB_MERGE_NICS");
+    if (!mergeEnv || atoi(mergeEnv) != 0) {
+        GTEST_SKIP() << "Set NCCL_IB_MERGE_NICS=0 to exercise the merge-disabled guard";
+    }
+
+    ASSERT_TRUE(validateTestPrerequisites(kMinProcessesForMPI, MPITestConstants::kNoProcessLimit,
+                                         kRequirePowerOfTwo, 1, kNoNodeLimit))
+        << "Test requirements not met";
+
+    int ndev = 0;
+    AssertInitAndGetDevices(&ndev);
+    if (ndev < 2) {
+        GTEST_SKIP() << "Need at least 2 devices to request a 2-device merge";
+    }
+
+    ncclNetVDeviceProps_t vProps;
+    vProps.ndevs = 2;
+    vProps.devs[0] = 0;
+    vProps.devs[1] = 1;
+
+    int vdev = -1;
+    ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
+    EXPECT_EQ(result, ncclInvalidUsage)
+        << "Multi-device merge with NCCL_IB_MERGE_NICS=0 must be rejected";
+}
+
+// Reads the NUMA node of a physical IB device from its sysfs pciPath
+// (<pciPath>/numa_node), mirroring ncclIbGetNumaNodeFromPath in net_ib.cc.
+// Returns -1 if unknown. Used to pick a genuinely cross-NUMA device pair
+// instead of hard-coding indices that assume a specific topology.
+static int ReadDeviceNumaNode(const ncclNetProperties_t& props) {
+    if (props.pciPath == nullptr) return -1;
+    std::string numaPath = std::string(props.pciPath) + "/numa_node";
+    FILE* f = fopen(numaPath.c_str(), "r");
+    if (f == nullptr) return -1;
+    int numa = -1;
+    if (fscanf(f, "%d", &numa) != 1) numa = -1;
+    fclose(f);
+    return numa;
+}
+
+TEST_F(NetIbMPITest, MakeVirtualDeviceCrossNuma) {
+    // Merging NICs on different NUMA nodes is warning-only, so the merge must
+    // still succeed. Picks a cross-NUMA pair by reading each device's numa_node
+    // from sysfs (correct on any layout, no fixed indices); skips when no such
+    // pair exists or merging is disabled.
+    ASSERT_TRUE(validateTestPrerequisites(kMinProcessesForMPI, MPITestConstants::kNoProcessLimit,
+                                         kRequirePowerOfTwo, 1, kNoNodeLimit))
+        << "Test requirements not met";
+
+    const char* mergeEnv = getenv("NCCL_IB_MERGE_NICS");
+    if (mergeEnv && atoi(mergeEnv) == 0) {
+        GTEST_SKIP() << "NIC merging disabled (NCCL_IB_MERGE_NICS=0)";
+    }
+
+    int ndev = 0;
+    AssertInitAndGetDevices(&ndev);
+
+    // Find two PHYSICAL devices on different NUMA nodes. Skip merged vNICs
+    // (vProps.ndevs > 1) that earlier tests may have left in the device table —
+    // they have no single NUMA node and their indices are order-dependent.
+    int devA = -1, numaA = -1, devB = -1;
+    for (int i = 0; i < ndev && devB < 0; i++) {
+        ncclNetProperties_t pi;
+        memset(&pi, 0, sizeof(pi));
+        if (GetDeviceProperties(i, &pi) != ncclSuccess) continue;
+        if (pi.vProps.ndevs > 1) continue;  // merged vNIC, not a physical NIC
+        int numaI = ReadDeviceNumaNode(pi);
+        if (numaI < 0) continue;
+        if (devA < 0) { devA = i; numaA = numaI; continue; }
+        if (numaI != numaA) devB = i;
+    }
+    if (devA < 0 || devB < 0) {
+        GTEST_SKIP() << "No cross-NUMA physical NIC pair available on this node";
+    }
+
+    ncclNetVDeviceProps_t vProps;
+    vProps.ndevs = 2;
+    vProps.devs[0] = devA;
+    vProps.devs[1] = devB;
+
+    int vdev = -1;
+    // Cross-NUMA is a warning, not an error: the merge must succeed.
+    ASSERT_EQ(MakeVirtualDevice(&vdev, &vProps), ncclSuccess)
+        << "Cross-NUMA vNIC (devs " << devA << "," << devB << ") should still be created";
+    EXPECT_GE(vdev, 0) << "Cross-NUMA vNIC ID should be non-negative";
+}
+
+TEST_F(NetIbMPITest, MakeVirtualDeviceOutOfRangeDev) {
+    // Covers the device bounds check in ncclIbMakeVDeviceInternal that rejects a
+    // physical index >= the physical device count. The reported device count
+    // (merged) is always >= the physical count, so using it as the index is
+    // guaranteed out of range regardless of how many vNICs already exist.
+    ASSERT_TRUE(validateTestPrerequisites(kMinProcessesForMPI, MPITestConstants::kNoProcessLimit,
+                                         kRequirePowerOfTwo, 1, kNoNodeLimit))
+        << "Test requirements not met";
+
+    int ndev = 0;
+    AssertInitAndGetDevices(&ndev);
+
+    ncclNetVDeviceProps_t vProps;
+    vProps.ndevs = 2;
+    vProps.devs[0] = 0;
+    vProps.devs[1] = ndev;  // >= physical count -> guaranteed out of range
+
+    int vdev = -1;
+    ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
+    EXPECT_EQ(result, ncclInvalidUsage) << "Out-of-range physical device must be rejected";
+}
+
+TEST_F(NetIbMPITest, MakeVirtualDeviceDuplicateDevs) {
+    // Listing the same physical device twice must be deduped into a single-device
+    // vNIC rather than rejected or double-counted.
+    ASSERT_TRUE(validateTestPrerequisites(kMinProcessesForMPI, MPITestConstants::kNoProcessLimit,
+                                         kRequirePowerOfTwo, 1, kNoNodeLimit))
+        << "Test requirements not met";
+
+    // Dedup yields a 1-device vNIC, which requires merging to be enabled
+    // (NCCL_IB_MERGE_NICS defaults to 1). Skip only when it is explicitly off,
+    // otherwise the merge must succeed so the dedup arm is actually exercised.
+    const char* mergeEnv = getenv("NCCL_IB_MERGE_NICS");
+    if (mergeEnv && atoi(mergeEnv) == 0) {
+        GTEST_SKIP() << "NIC merging disabled (NCCL_IB_MERGE_NICS=0)";
+    }
+
+    int ndev = 0;
+    AssertInitAndGetDevices(&ndev);
+    if (ndev < 1) {
+        GTEST_SKIP() << "Need at least 1 device";
+    }
+
+    ncclNetVDeviceProps_t vProps;
+    vProps.ndevs = 2;
+    vProps.devs[0] = 0;
+    vProps.devs[1] = 0;  // duplicate -> exercises the used[] continue arm
+
+    int vdev = -1;
+    ASSERT_EQ(MakeVirtualDevice(&vdev, &vProps), ncclSuccess)
+        << "Deduped vNIC (same device twice) should be created";
+    ASSERT_GE(vdev, 0) << "Deduped virtual device ID should be non-negative";
+
+    // Verify the dedup actually collapsed the duplicate: the resulting vNIC must
+    // contain exactly one physical device. Without this, a silently-broken dedup
+    // (both entries added) would still return ncclSuccess and pass.
+    ncclNetProperties_t props;
+    memset(&props, 0, sizeof(props));
+    ASSERT_EQ(GetDeviceProperties(vdev, &props), ncclSuccess);
+    EXPECT_EQ(props.vProps.ndevs, 1) << "Dedup should yield a single-device vNIC";
 }
 
 // NIC Fusion (vNIC) Tests
@@ -107,7 +292,7 @@ TEST_F(NetIbMPITest, ConnectAndTransfer_VNic) {
         memset(buffer, 0, bufferSize);
         PostSingleRecv(pair.recvComm, buffer, bufferSize, tag, mhandle, &request);
     } else {
-        FillHostBuffer(buffer, bufferSize, seed);
+        fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
         PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
     }
 
@@ -119,7 +304,7 @@ TEST_F(NetIbMPITest, ConnectAndTransfer_VNic) {
     // Verify data integrity.
     if (rank == 0) {
         EXPECT_EQ(sizes[0], bufferSize) << "Received size mismatch";
-        EXPECT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Data validation failed on vNIC transfer";
+        EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Data validation failed on vNIC transfer";
     }
 }
 
@@ -127,6 +312,16 @@ TEST_F(NetIbMPITest, AsymmetricMerge_VNic) {
     ASSERT_TRUE(validateTestPrerequisites(kExactTwoProcesses, kExactTwoProcesses,
                                          false, kMinGpusPerNode, kNoNodeLimit))
         << "Test requires exactly " << kExactTwoProcesses << " processes";
+
+    // Skip when resiliency is enabled: asymmetric makeVDevice leaves stale
+    // entries in the global IbCastMergedDevs table (IbCastNMergedDevs is not
+    // reset by finalize), corrupting subsequent failover tests that also
+    // call makeVDevice. See docs/asymmetric-merge-test-isolation-bug.md.
+    const char* failoverEnv = getenv("NCCL_IB_RESILIENCY_PORT_FAILOVER");
+    if (failoverEnv && strcmp(failoverEnv, "1") == 0) {
+        GTEST_SKIP() << "Skipped: AsymmetricMerge_VNic corrupts global device table, "
+                     << "breaking subsequent failover tests (known test isolation bug)";
+    }
 
     int ndev = 0;
     AssertInitAndGetDevices(&ndev);
@@ -210,7 +405,7 @@ TEST_F(NetIbMPITest, AsymmetricMerge_VNic) {
         memset(buffer, 0, bufferSize);
         PostSingleRecv(pair.recvComm, buffer, bufferSize, tag, mhandle, &request);
     } else {
-        FillHostBuffer(buffer, bufferSize, seed);
+        fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
         PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
     }
 
@@ -222,8 +417,100 @@ TEST_F(NetIbMPITest, AsymmetricMerge_VNic) {
     // Verify data integrity across the asymmetric connection.
     if (rank == 0) {
         EXPECT_EQ(sizes[0], bufferSize) << "Received size mismatch";
-        EXPECT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Data validation failed on asymmetric vNIC transfer";
+        EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Data validation failed on asymmetric vNIC transfer";
     }
+}
+
+TEST_F(NetIbMPITest, DisjointMergeRailLocal_VNic) {
+    // Exercises CheckVProps' rail-local mismatch + ndevs-swap arms on accept,
+    // reached when the two ranks' vNICs share no physical devices. Requires
+    // NCCL_IB_WARN_RAIL_LOCAL=1 (defaults off) and >=5 physical NICs.
+    ASSERT_TRUE(validateTestPrerequisites(kExactTwoProcesses, kExactTwoProcesses,
+                                         false, kMinGpusPerNode, kNoNodeLimit))
+        << "Test requires exactly " << kExactTwoProcesses << " processes";
+
+    ASSERT_EQ(InitNetIb(), ncclSuccess);
+
+    // Gather all skip reasons into one flag and agree across ranks BEFORE any
+    // MPI_Send/Recv, so the two ranks never diverge (one skipping while the
+    // other blocks in the handshake). Reasons: failover on (global device-table
+    // isolation, same caveat as AsymmetricMerge_VNic), WARN_RAIL_LOCAL not set,
+    // or too few PHYSICAL NICs (>=5 needed; the merged count would inflate this
+    // spuriously). Physical NIC count is min-reduced across ranks.
+    const char* failoverEnv = getenv("NCCL_IB_RESILIENCY_PORT_FAILOVER");
+    const char* warnEnv = getenv("NCCL_IB_WARN_RAIL_LOCAL");
+    int minNdev = GetPhysicalDeviceCount();
+    MPI_Allreduce(MPI_IN_PLACE, &minNdev, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    int skip = 0;
+    if (failoverEnv && strcmp(failoverEnv, "1") == 0) skip = 1;
+    if (!warnEnv || atoi(warnEnv) == 0) skip = 1;
+    if (minNdev < 5) skip = 1;
+    MPI_Allreduce(MPI_IN_PLACE, &skip, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    if (skip) {
+        GTEST_SKIP() << "Need NCCL_IB_WARN_RAIL_LOCAL=1, failover off, and >=5 NICs "
+                     << "(have " << minNdev << ") for disjoint rail-local coverage";
+    }
+
+    int rank = MPIEnvironment::world_rank;
+    int peerRank = (rank + 1) % 2;
+
+    // Each rank merges a disjoint, asymmetric device set (rank0: 2 devs,
+    // rank1: 3 devs) so the empty intersection drives the rail-local warn arm
+    // and the size difference drives the ndevs-swap arm in ncclIbCheckVProps.
+    ncclNetVDeviceProps_t vProps;
+    if (rank == 0) { vProps.ndevs = 2; vProps.devs[0] = 0; vProps.devs[1] = 1; }
+    else           { vProps.ndevs = 3; vProps.devs[0] = 2; vProps.devs[1] = 3; vProps.devs[2] = 4; }
+
+    // Setup happens before the matched MPI_Send/Recv, so a unilateral fatal
+    // assert here would deadlock the peer. Use EXPECT, then MPI_Allreduce the
+    // local-setup status so both ranks abort together if either side failed.
+    int vdev = -1;
+    EXPECT_EQ(MakeVirtualDevice(&vdev, &vProps), ncclSuccess) << "Failed to create disjoint vNIC";
+    int setupOk = (vdev >= 0) ? 1 : 0;
+    ConnectionPair pair;
+    if (rank == 0 && setupOk) {
+        if (CreateListenComm(vdev, &pair.handle, &pair.listenComm) != ncclSuccess) setupOk = 0;
+    }
+    MPI_Allreduce(MPI_IN_PLACE, &setupOk, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    ASSERT_EQ(setupOk, 1) << "vNIC/listen setup failed on at least one rank";
+
+    int done = 0;
+    if (rank == 0) {
+        MPI_Send(&pair.handle, sizeof(ncclNetHandle_t), MPI_BYTE, peerRank, 0, MPI_COMM_WORLD);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kConnectPollTimeoutSec);
+        while (!done && std::chrono::steady_clock::now() < deadline) {
+            if (AcceptConnection(pair.listenComm, &pair.recvComm) != ncclSuccess) break;
+            if (pair.recvComm != nullptr) done = 1;
+            else usleep(kPollIntervalUs);  // avoid busy-spin while accept is pending
+        }
+    } else {
+        MPI_Recv(&pair.handle, sizeof(ncclNetHandle_t), MPI_BYTE, peerRank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kConnectPollTimeoutSec);
+        while (!done && std::chrono::steady_clock::now() < deadline) {
+            if (ConnectToRemote(vdev, &pair.handle, &pair.sendComm) != ncclSuccess) break;
+            if (pair.sendComm != nullptr) done = 1;
+            else usleep(kPollIntervalUs);  // avoid busy-spin while connect is pending
+        }
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    NetConnectionGuard connGuard(net_);
+    if (rank == 0) {
+        connGuard.setRecvComm(pair.recvComm);
+        connGuard.setListenComm(pair.listenComm);
+    } else {
+        connGuard.setSendComm(pair.sendComm);
+    }
+
+    // The coverage target (CheckVProps rail-local warn during accept) has run by
+    // now. Agree on completion across ranks so a one-sided timeout surfaces as a
+    // clear failure rather than a hang on the final barrier.
+    MPI_Allreduce(MPI_IN_PLACE, &done, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    EXPECT_EQ(done, 1) << "Disjoint-rail accept/connect did not complete within "
+                       << kConnectPollTimeoutSec << "s on at least one rank";
+
+    MPI_Barrier(MPI_COMM_WORLD);
 }
 
 TEST_F(NetIbMPITest, CloseWithoutTransfer_VNic) {
@@ -287,7 +574,7 @@ TEST_F(NetIbMPITest, CloseWithoutTransfer_VNic) {
         memset(buffer, 0, bufferSize);
         PostSingleRecv(pair2.recvComm, buffer, bufferSize, tag, mhandle, &request);
     } else {
-        FillHostBuffer(buffer, bufferSize, seed);
+        fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
         PostSendWithRetry(pair2.sendComm, buffer, bufferSize, tag, mhandle, &request);
     }
 
@@ -299,7 +586,7 @@ TEST_F(NetIbMPITest, CloseWithoutTransfer_VNic) {
     // Verify the vNIC is still functional after the no-transfer teardown.
     if (rank == 0) {
         EXPECT_EQ(sizes[0], bufferSize) << "Received size mismatch";
-        EXPECT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Data validation failed after no-transfer teardown reconnect";
+        EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Data validation failed after no-transfer teardown reconnect";
     }
 }
 
@@ -366,7 +653,7 @@ TEST_F(NetIbMPITest, RegDeregCycling_VNic) {
         memset(buffer, 0, bufferSize);
         PostSingleRecv(pair.recvComm, buffer, bufferSize, tag, mhandle, &request);
     } else {
-        FillHostBuffer(buffer, bufferSize, seed);
+        fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
         PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
     }
 
@@ -378,7 +665,7 @@ TEST_F(NetIbMPITest, RegDeregCycling_VNic) {
     // Data integrity check after MR cache cycling.
     if (rank == 0) {
         EXPECT_EQ(sizes[0], bufferSize) << "Received size mismatch";
-        EXPECT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Data validation failed after reg/dereg cycling";
+        EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Data validation failed after reg/dereg cycling";
     }
 }
 
@@ -431,7 +718,7 @@ TEST_F(NetIbMPITest, LargeTransfer_VNic) {
         memset(buffer, 0, bufferSize);
         PostSingleRecv(pair.recvComm, buffer, bufferSize, tag, mhandle, &request);
     } else {
-        FillHostBuffer(buffer, bufferSize, seed);
+        fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
         PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
     }
 
@@ -445,7 +732,7 @@ TEST_F(NetIbMPITest, LargeTransfer_VNic) {
     // ncclIbMultiSend would corrupt data at QP split points.
     if (rank == 0) {
         EXPECT_EQ(sizes[0], bufferSize) << "Large transfer size mismatch";
-        EXPECT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Large vNIC transfer data validation failed";
+        EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Large vNIC transfer data validation failed";
     }
 }
 
@@ -507,7 +794,7 @@ TEST_F(NetIbMPITest, MixedSizes_VNic) {
             memset(buffer, 0, size);
             PostSingleRecv(pair.recvComm, buffer, size, tag, mhandle, &request);
         } else {
-            FillHostBuffer(buffer, size, seed);
+            fillHostBufferWithPattern<uint8_t>(buffer, size, makeBytePattern(seed));
             PostSendWithRetry(pair.sendComm, buffer, size, tag, mhandle, &request);
         }
 
@@ -522,7 +809,7 @@ TEST_F(NetIbMPITest, MixedSizes_VNic) {
 
         if (rank == 0) {
             EXPECT_EQ(sizes[0], size) << "Size mismatch for transfer of " << size << " bytes";
-            EXPECT_TRUE(VerifyHostBuffer(buffer, size, seed)) << "Data validation failed for size " << size;
+            EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, size, makeBytePattern(seed))) << "Data validation failed for size " << size;
         }
     }
 }
@@ -584,7 +871,7 @@ TEST_F(NetIbMPITest, UnalignedSizeTransfer_VNic) {
             memset(buffer, 0, size);
             PostSingleRecv(pair.recvComm, buffer, size, tag, mhandle, &request);
         } else {
-            FillHostBuffer(buffer, size, seed);
+            fillHostBufferWithPattern<uint8_t>(buffer, size, makeBytePattern(seed));
             PostSendWithRetry(pair.sendComm, buffer, size, tag, mhandle, &request);
         }
 
@@ -599,7 +886,7 @@ TEST_F(NetIbMPITest, UnalignedSizeTransfer_VNic) {
         // Byte level verification at the striping boundary.
         if (rank == 0) {
             EXPECT_EQ(sizes[0], size) << "Size mismatch for transfer of " << size << " bytes";
-            EXPECT_TRUE(VerifyHostBuffer(buffer, size, seed)) << "Data validation failed for size " << size;
+            EXPECT_TRUE(verifyHostBufferData<uint8_t>(buffer, size, makeBytePattern(seed))) << "Data validation failed for size " << size;
         }
     }
 }
@@ -713,7 +1000,7 @@ TEST_F(NetIbMPITest, Bidirectional_VNic) {
     const int sendSeed = 5700 + rank;
 
     // Fill send buffer with rank-specific pattern.
-    FillHostBuffer(sendBuf, bufferSize, sendSeed);
+    fillHostBufferWithPattern<uint8_t>(sendBuf, bufferSize, makeBytePattern(sendSeed));
 
     // Post recv and send simultaneously on both connections.
     void* recvRequest = nullptr;
@@ -737,7 +1024,7 @@ TEST_F(NetIbMPITest, Bidirectional_VNic) {
     // Verify received data matches the peer's send pattern.
     int peerSeed = 5700 + peerRank;
     EXPECT_EQ(recvSizesOut[0], bufferSize) << "Received size mismatch";
-    EXPECT_TRUE(VerifyHostBuffer(recvBuf, bufferSize, peerSeed)) << "Bidirectional vNIC transfer data validation failed";
+    EXPECT_TRUE(verifyHostBufferData<uint8_t>(recvBuf, bufferSize, makeBytePattern(peerSeed))) << "Bidirectional vNIC transfer data validation failed";
 }
 
 TEST_F(NetIbMPITest, FlushRepeated_VNic) {
@@ -794,7 +1081,7 @@ TEST_F(NetIbMPITest, FlushRepeated_VNic) {
 
         if (rank == 1) {
             // Fill GPU buffer via DeviceBufferHelpers (host vector → hipMemcpy in one call).
-            ASSERT_EQ(InitializeBuffer(gpuBuffer, bufferSize, seed), hipSuccess);
+            ASSERT_EQ(initializeBufferWithPattern<uint8_t>(gpuBuffer, bufferSize, makeBytePattern(seed)), hipSuccess);
             PostSendWithRetry(pair.sendComm, gpuBuffer, bufferSize, tag, mhandle, &request);
         } else {
             // Rank 0: post recv on GPU buffer.
@@ -822,7 +1109,7 @@ TEST_F(NetIbMPITest, FlushRepeated_VNic) {
             }
 
             // Verify GPU buffer via DeviceBufferHelpers (hipMemcpy + compare in one call).
-            ASSERT_TRUE(VerifyBuffer(gpuBuffer, bufferSize, seed))
+            ASSERT_TRUE(verifyBufferData<uint8_t>(gpuBuffer, bufferSize, makeBytePattern(seed)))
                 << "Iter " << iter << ": data verification failed after flush";
         }
 
@@ -880,7 +1167,7 @@ TEST_F(NetIbMPITest, SequentialTransfers_VNic) {
 
         if (rank == 1) {
             // Fill buffer with per-iteration pattern.
-            FillHostBuffer(buffer, bufferSize, seed);
+            fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
             PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
         } else {
             // Zero buffer before recv to ensure verification catches stale data.
@@ -897,7 +1184,7 @@ TEST_F(NetIbMPITest, SequentialTransfers_VNic) {
         // Verify received data matches the iteration-specific pattern.
         if (rank == 0) {
             ASSERT_EQ(sizes[0], bufferSize) << "Iter " << iter << ": received size mismatch";
-            ASSERT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Iter " << iter << ": data verification failed";
+            ASSERT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Iter " << iter << ": data verification failed";
         }
 
         // Sync before next iteration to prevent request reuse races.
@@ -908,7 +1195,7 @@ TEST_F(NetIbMPITest, SequentialTransfers_VNic) {
 // =============================================================================
 // Test: SendRecvDifferentMemoryTypes
 //
-// Creates a 2-NIC merged virtual device per rank (CreateMergedDevice(2, rank)).
+// Creates a 2-NIC merged virtual device per rank (CreateMergedDevice(2)).
 // Rank 0 (receiver) and Rank 1 (sender) each use their own merged device.
 // Tests all four memory type combinations: host→host, host→GPU, GPU→host, GPU→GPU.
 //
@@ -929,9 +1216,9 @@ TEST_F(NetIbMPITest, SendRecvDifferentMemoryTypes) {
 
     ASSERT_EQ(InitNetIb(), ncclSuccess);
 
-    int mergedDev = CreateMergedDevice(2, rank);
+    int mergedDev = CreateMergedDevice(2);
     if (mergedDev == -1) {
-        GTEST_SKIP() << "Failed to create merged device";
+        GTEST_SKIP() << mergeSkipReason_;
     }
 
     ncclNetProperties_t mProps;
@@ -999,9 +1286,9 @@ TEST_F(NetIbMPITest, SendRecvDifferentMemoryTypes) {
 
         if (rank == 1) {
             if (memType == NCCL_PTR_CUDA) {
-                ASSERT_EQ(InitializeBuffer(buf, sz, seed), hipSuccess);
+                ASSERT_EQ(initializeBufferWithPattern<uint8_t>(buf, sz, makeBytePattern(seed)), hipSuccess);
             } else {
-                FillHostBuffer(buf, sz, seed);
+                fillHostBufferWithPattern<uint8_t>(buf, sz, makeBytePattern(seed));
             }
         } else {
             if (memType == NCCL_PTR_CUDA) {
@@ -1040,9 +1327,9 @@ TEST_F(NetIbMPITest, SendRecvDifferentMemoryTypes) {
             }
 
             if (memType == NCCL_PTR_CUDA) {
-                EXPECT_TRUE(VerifyBuffer(buf, sz, seed)) << "Data mismatch for " << c.desc;
+                EXPECT_TRUE(verifyBufferData<uint8_t>(buf, sz, makeBytePattern(seed))) << "Data mismatch for " << c.desc;
             } else {
-                EXPECT_TRUE(VerifyHostBuffer(buf, sz, seed)) << "Data mismatch for " << c.desc;
+                EXPECT_TRUE(verifyHostBufferData<uint8_t>(buf, sz, makeBytePattern(seed))) << "Data mismatch for " << c.desc;
             }
         }
     }
@@ -1058,9 +1345,9 @@ TEST_F(NetIbMPITest, SendRecvMultipleSizesFusion) {
 
     ASSERT_EQ(InitNetIb(), ncclSuccess);
 
-    int mergedDev = CreateMergedDevice(3, rank);
+    int mergedDev = CreateMergedDevice(3);
     if (mergedDev == -1) {
-        GTEST_SKIP() << "Failed to create merged device";
+        GTEST_SKIP() << mergeSkipReason_;
     }
 
     // Build test size list
@@ -1125,7 +1412,7 @@ TEST_F(NetIbMPITest, SendRecvMultipleSizesFusion) {
         int seed = 9000 + (int)idx;
 
         if (rank == 1) {
-            FillHostBuffer(buffer, sz, seed);
+            fillHostBufferWithPattern<uint8_t>(buffer, sz, makeBytePattern(seed));
         } else {
             memset(buffer, 0xDE, sz);
         }
@@ -1153,9 +1440,8 @@ TEST_F(NetIbMPITest, SendRecvMultipleSizesFusion) {
             uint8_t errExp = 0, errGot = 0;
 
             if (sizeOk) {
-                dataOk = RCCLTestHelpers::verifyHostBufferData<uint8_t>(buffer, sz,
-                    [seed](size_t i) { return static_cast<uint8_t>((seed + i) % kBytePatternModulo); },
-                    0, 0.0, &errIdx, &errExp, &errGot);
+                dataOk = verifyHostBufferData<uint8_t>(buffer, sz,
+                    makeBytePattern(seed), 0, 0.0, &errIdx, &errExp, &errGot);
             }
 
             bool ok = sizeOk && dataOk;
@@ -1184,9 +1470,9 @@ TEST_F(NetIbMPITest, MultidirectionalTransfer) {
 
     ASSERT_EQ(InitNetIb(), ncclSuccess);
 
-    int mergedSendDev = CreateMergedDevice(4, rank);
+    int mergedSendDev = CreateMergedDevice(4);
     if (mergedSendDev == -1) {
-        GTEST_SKIP() << "Failed to create merged device";
+        GTEST_SKIP() << mergeSkipReason_;
     }
     int mergedRecvDev = mergedSendDev;
 
@@ -1259,7 +1545,7 @@ TEST_F(NetIbMPITest, MultidirectionalTransfer) {
         ASSERT_EQ(RegisterMemory(myRecvComm, recvBuf, pat.recvSize,
                                  NCCL_PTR_HOST, &recvMr), ncclSuccess);
 
-        FillHostBuffer(sendBuf, pat.sendSize, pat.sendSeed);
+        fillHostBufferWithPattern<uint8_t>(sendBuf, pat.sendSize, makeBytePattern(pat.sendSeed));
         memset(recvBuf, 0xDE, pat.recvSize);
 
         // BOTH ranks post recv
@@ -1290,9 +1576,8 @@ TEST_F(NetIbMPITest, MultidirectionalTransfer) {
         {
             size_t errIdx = 0;
             uint8_t errExp = 0, errGot = 0;
-            bool ok = RCCLTestHelpers::verifyHostBufferData<uint8_t>(recvBuf, pat.recvSize,
-                [&pat](size_t j) { return static_cast<uint8_t>((pat.recvSeed + j) % kBytePatternModulo); },
-                0, 0.0, &errIdx, &errExp, &errGot);
+            bool ok = verifyHostBufferData<uint8_t>(recvBuf, pat.recvSize,
+                makeBytePattern(pat.recvSeed), 0, 0.0, &errIdx, &errExp, &errGot);
             EXPECT_TRUE(ok) << pat.name << " rank " << rank
                             << " data mismatch at byte " << errIdx
                             << ": expected " << (int)errExp << " got " << (int)errGot;
@@ -1325,9 +1610,9 @@ TEST_F(NetIbMPITest, MultipleOutstandingSendRecv) {
     // --- Init and discover devices ---
     ASSERT_EQ(InitNetIb(), ncclSuccess);
 
-    int mergedDev = CreateMergedDevice(2, rank);
+    int mergedDev = CreateMergedDevice(2);
     if (mergedDev == -1) {
-        GTEST_SKIP() << "Failed to create merged device";
+        GTEST_SKIP() << mergeSkipReason_;
     }
 
     // --- Parameters ---
@@ -1427,7 +1712,7 @@ TEST_F(NetIbMPITest, MultipleOutstandingSendRecv) {
         // Fill each buffer with a unique pattern and post send
         for (int i = 0; i < kNumOutstanding; i++) {
             int seed = kTagBase + i;
-            FillHostBuffer(bufs[i], kLargeBufferSize, seed);
+            fillHostBufferWithPattern<uint8_t>(bufs[i], kLargeBufferSize, makeBytePattern(seed));
 
             void* sendReq = nullptr;
             ASSERT_EQ(PostSend(pair.sendComm, bufs[i], kLargeBufferSize,
@@ -1471,9 +1756,8 @@ TEST_F(NetIbMPITest, MultipleOutstandingSendRecv) {
             int seed = kTagBase + i;
             size_t errIdx = 0;
             uint8_t errExp = 0, errGot = 0;
-            bool good = RCCLTestHelpers::verifyHostBufferData<uint8_t>(bufs[i], kLargeBufferSize,
-                [seed](size_t j) { return static_cast<uint8_t>((seed + j) % kBytePatternModulo); },
-                0, 0.0, &errIdx, &errExp, &errGot);
+            bool good = verifyHostBufferData<uint8_t>(bufs[i], kLargeBufferSize,
+                makeBytePattern(seed), 0, 0.0, &errIdx, &errExp, &errGot);
 
             if (good) {
                 ok++;
@@ -1524,9 +1808,9 @@ TEST_F(NetIbMPITest, MultipleOutstandingSendRecv) {
 // Test: MergeMultipleDevices
 //
 // Tests makeVDevice() with increasing numbers of physical devices:
-//   - 3 devices: should succeed (within NCCL_NET_MAX_DEVS_PER_NIC = 4 limit)
-//   - 4 devices: should succeed (at the limit)
-//   - 5 devices: should fail (exceeds the limit)
+//   - below NCCL_NET_MAX_DEVS_PER_NIC: should succeed
+//   - at the limit:                    should succeed
+//   - above the limit:                 should fail, adding no device
 //
 // makeVDevice() is additive — each successful call appends a new merged device
 // to the device list. Physical devices remain visible (hiding is done by the
@@ -1538,11 +1822,20 @@ TEST_F(NetIbMPITest, MergeMultipleDevices) {
                                          kRequirePowerOfTwo, 1, kNoNodeLimit))
         << "Test requirements not met";
 
+    // With merging off, every ndevs > 1 request is refused and the over-limit case would
+    // pass for the wrong reason.
+    const char* mergeEnv = getenv("NCCL_IB_MERGE_NICS");
+    if (mergeEnv && atoi(mergeEnv) == 0) {
+        GTEST_SKIP() << "NIC merging disabled (NCCL_IB_MERGE_NICS=0)";
+    }
+
     ASSERT_EQ(InitNetIb(), ncclSuccess);
 
     int ndev = 0;
     ASSERT_EQ(GetDeviceCount(&ndev), ncclSuccess);
     ASSERT_GT(ndev, 0);
+
+    constexpr int kMaxDevsPerNic = NCCL_NET_MAX_DEVS_PER_NIC;
 
     // --- Collect all device properties and identify physical (non-merged) devices ---
     std::vector<ncclNetProperties_t> allProps(ndev);
@@ -1552,160 +1845,132 @@ TEST_F(NetIbMPITest, MergeMultipleDevices) {
         memset(&allProps[i], 0, sizeof(ncclNetProperties_t));
         ASSERT_EQ(GetDeviceProperties(i, &allProps[i]), ncclSuccess);
 
-        bool isMerged = (allProps[i].name && strchr(allProps[i].name, '+') != nullptr);
-        if (!isMerged) {
+        // Only the init-time 1:1 vNICs wrap their own index; MakeVirtualDeviceDuplicateDevs
+        // leaves behind a deduped vNIC that also has ndevs == 1 but wraps a lower index.
+        if (allProps[i].vProps.ndevs == 1 && allProps[i].vProps.devs[0] == i) {
             physicalDevices.push_back(i);
         }
     }
 
-    if (physicalDevices.size() < 5) {
-        GTEST_SKIP() << "Need at least 5 physical (non-merged) IB devices, found "
-                     << physicalDevices.size();
+    if (physicalDevices.empty()) {
+        GTEST_SKIP() << "No physical IB devices found";
     }
 
-    // --- Find 5 physical devices with matching speed ---
+    // --- Take up to kMaxDevsPerNic physical devices sharing one speed ---
     int targetSpeed = allProps[physicalDevices[0]].speed;
     std::vector<int> selected;
 
-    for (size_t i = 0; i < physicalDevices.size() && selected.size() < 5; i++) {
+    for (size_t i = 0; i < physicalDevices.size() && (int)selected.size() < kMaxDevsPerNic; i++) {
         int devIdx = physicalDevices[i];
         if (allProps[devIdx].speed == targetSpeed) {
             selected.push_back(devIdx);
         }
     }
 
-    if (selected.size() < 5) {
-        GTEST_SKIP() << "Could not find 5 physical devices with matching speed. "
-                     << "Found " << selected.size() << " devices at speed " << targetSpeed;
+    const int mergeCount = (int)selected.size();
+    if (mergeCount < 2) {
+        GTEST_SKIP() << "Need at least 2 physical devices at a common speed, found " << mergeCount
+                     << " at speed " << targetSpeed;
     }
 
-    // =========================================================================
-    // Sub-test 1: Merge 3 devices (should succeed, under limit of 4)
-    // =========================================================================
-    {
+    // Merge selected[0..count-1] and check the resulting vNIC. Distinct indices only,
+    // so the merged device must report exactly `count` constituents.
+    auto expectMergeSucceeds = [&](int count) {
+        SCOPED_TRACE(testing::Message() << "merging " << count << " devices, limit " << kMaxDevsPerNic);
+
         int ndevBefore = 0;
         ASSERT_EQ(GetDeviceCount(&ndevBefore), ncclSuccess);
 
         ncclNetVDeviceProps_t vProps;
         memset(&vProps, 0, sizeof(vProps));
-        vProps.ndevs = 3;
-        vProps.devs[0] = selected[0];
-        vProps.devs[1] = selected[1];
-        vProps.devs[2] = selected[2];
-
-        int vdev = -1;
-        ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
-
-        EXPECT_EQ(result, ncclSuccess)
-            << "Merging 3 devices should succeed (within limit of 4)";
-
-        if (result == ncclSuccess) {
-            EXPECT_GE(vdev, 0) << "Virtual device index should be non-negative";
-
-            // Device count should increase by 1
-            int ndevAfter = 0;
-            ASSERT_EQ(GetDeviceCount(&ndevAfter), ncclSuccess);
-            EXPECT_EQ(ndevAfter, ndevBefore + 1)
-                << "makeVDevice should add exactly one device";
-
-            // Verify the new merged device properties
-            ncclNetProperties_t vdevProps;
-            memset(&vdevProps, 0, sizeof(vdevProps));
-            ASSERT_EQ(GetDeviceProperties(vdev, &vdevProps), ncclSuccess);
-
-            // Name should contain two '+' separators (3 devices)
-            ASSERT_NE(vdevProps.name, nullptr);
-            std::string mergedName(vdevProps.name);
-            int plusCount = 0;
-            for (char c : mergedName) {
-                if (c == '+') plusCount++;
-            }
-            EXPECT_EQ(plusCount, 2)
-                << "3-device merge should have 2 '+' separators, got " << plusCount
-                << " in name '" << mergedName << "'";
-
-            // Speed should be sum of 3 constituents
-            int expectedSpeed = allProps[selected[0]].speed +
-                                allProps[selected[1]].speed +
-                                allProps[selected[2]].speed;
-            EXPECT_EQ(vdevProps.speed, expectedSpeed)
-                << "Merged speed should be " << expectedSpeed << ", got " << vdevProps.speed;
+        vProps.ndevs = count;
+        int expectedSpeed = 0;
+        for (int i = 0; i < count; i++) {
+            vProps.devs[i] = selected[i];
+            expectedSpeed += allProps[selected[i]].speed;
         }
-    }
-
-    // =========================================================================
-    // Sub-test 2: Merge 4 devices (should succeed, at the limit)
-    // =========================================================================
-    {
-        int ndevBefore = 0;
-        ASSERT_EQ(GetDeviceCount(&ndevBefore), ncclSuccess);
-
-        ncclNetVDeviceProps_t vProps;
-        memset(&vProps, 0, sizeof(vProps));
-        vProps.ndevs = 4;
-        vProps.devs[0] = selected[0];
-        vProps.devs[1] = selected[1];
-        vProps.devs[2] = selected[2];
-        vProps.devs[3] = selected[3];
 
         int vdev = -1;
-        ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
+        ASSERT_EQ(MakeVirtualDevice(&vdev, &vProps), ncclSuccess)
+            << "Merging " << count << " devices should succeed";
+        ASSERT_GE(vdev, 0) << "Virtual device index should be non-negative";
 
-        EXPECT_EQ(result, ncclSuccess)
-            << "Merging 4 devices should succeed (at the limit of NCCL_NET_MAX_DEVS_PER_NIC)";
+        int ndevAfter = 0;
+        ASSERT_EQ(GetDeviceCount(&ndevAfter), ncclSuccess);
+        EXPECT_EQ(ndevAfter, ndevBefore + 1) << "makeVDevice should add exactly one device";
 
-        if (result == ncclSuccess) {
-            EXPECT_GE(vdev, 0);
+        ncclNetProperties_t vdevProps;
+        memset(&vdevProps, 0, sizeof(vdevProps));
+        ASSERT_EQ(GetDeviceProperties(vdev, &vdevProps), ncclSuccess);
+        ASSERT_NE(vdevProps.name, nullptr);
 
-            int ndevAfter = 0;
-            ASSERT_EQ(GetDeviceCount(&ndevAfter), ncclSuccess);
-            EXPECT_EQ(ndevAfter, ndevBefore + 1);
-
-            ncclNetProperties_t vdevProps;
-            memset(&vdevProps, 0, sizeof(vdevProps));
-            ASSERT_EQ(GetDeviceProperties(vdev, &vdevProps), ncclSuccess);
-
-            // Name should contain three '+' separators (4 devices)
-            ASSERT_NE(vdevProps.name, nullptr);
-            std::string mergedName(vdevProps.name);
-            int plusCount = 0;
-            for (char c : mergedName) {
-                if (c == '+') plusCount++;
-            }
-            EXPECT_EQ(plusCount, 3)
-                << "4-device merge should have 3 '+' separators, got " << plusCount
-                << " in name '" << mergedName << "'";
-
-            // Speed should be sum of 4 constituents
-            int expectedSpeed = allProps[selected[0]].speed +
-                                allProps[selected[1]].speed +
-                                allProps[selected[2]].speed +
-                                allProps[selected[3]].speed;
-            EXPECT_EQ(vdevProps.speed, expectedSpeed)
-                << "Merged speed should be " << expectedSpeed << ", got " << vdevProps.speed;
+        std::string mergedName(vdevProps.name);
+        int plusCount = 0;
+        for (char c : mergedName) {
+            if (c == '+') plusCount++;
         }
+        EXPECT_EQ(plusCount, count - 1)
+            << count << "-device merge should have " << count - 1 << " '+' separators, got "
+            << plusCount << " in name '" << mergedName << "'";
+        EXPECT_EQ(vdevProps.speed, expectedSpeed)
+            << "Merged speed should be " << expectedSpeed << ", got " << vdevProps.speed;
+    };
+
+    // =========================================================================
+    // Sub-test 1: below the limit
+    // =========================================================================
+    if (mergeCount >= 3) {
+        ASSERT_NO_FATAL_FAILURE(expectMergeSucceeds(mergeCount - 1));
     }
 
     // =========================================================================
-    // Sub-test 3: Merge 5 devices (should FAIL, exceeds limit of 4)
+    // Sub-test 2: at the limit (or at the node's maximum, when it has fewer NICs)
+    // =========================================================================
+    ASSERT_NO_FATAL_FAILURE(expectMergeSucceeds(mergeCount));
+
+    if (mergeCount < kMaxDevsPerNic) {
+        TEST_INFO("Only %d same-speed NICs available; the ndevs == %d boundary was not exercised",
+                  mergeCount, kMaxDevsPerNic);
+    }
+
+    // =========================================================================
+    // Sub-test 3: above the limit — must be rejected, no device added
+    //
+    // ncclNetVDeviceProps_t::devs[] holds exactly NCCL_NET_MAX_DEVS_PER_NIC entries, so an
+    // over-limit request cannot be expressed in that struct. Pad a real props object with one
+    // spare devs[] slot: the plugin must reject on the ndevs count alone, before it ever
+    // indexes devs[], and a regressed guard that walks one entry too far stays inside memory
+    // this test owns.
     // =========================================================================
     {
         int ndevBefore = 0;
         ASSERT_EQ(GetDeviceCount(&ndevBefore), ncclSuccess);
 
-        ncclNetVDeviceProps_t vProps;
-        memset(&vProps, 0, sizeof(vProps));
-        vProps.ndevs = 5;
-        vProps.devs[0] = selected[0];
-        vProps.devs[1] = selected[1];
-        vProps.devs[2] = selected[2];
-        vProps.devs[3] = selected[3];
+        constexpr int kOverLimit = kMaxDevsPerNic + 1;
+
+        // The spare slot below only extends devs[], and so only keeps a one-entry overrun inside
+        // this object, while devs[] is the trailing member of the struct.
+        static_assert(offsetof(ncclNetVDeviceProps_t, devs) + sizeof(ncclNetVDeviceProps_t::devs) ==
+                          sizeof(ncclNetVDeviceProps_t),
+                      "ncclNetVDeviceProps_t gained a member after devs[]");
+
+        union {
+            ncclNetVDeviceProps_t props;
+            char padded[sizeof(ncclNetVDeviceProps_t) + sizeof(int)];
+        } request;
+
+        memset(&request, 0, sizeof(request));
+        request.props.ndevs = kOverLimit;
+        for (int i = 0; i < kMaxDevsPerNic; i++) {
+            request.props.devs[i] = selected[i % mergeCount];
+        }
 
         int vdev = -1;
-        ncclResult_t result = MakeVirtualDevice(&vdev, &vProps);
+        ncclResult_t result = MakeVirtualDevice(&vdev, &request.props);
 
-        EXPECT_NE(result, ncclSuccess)
-            << "Merging 5 devices should fail (exceeds NCCL_NET_MAX_DEVS_PER_NIC = 4)";
+        EXPECT_EQ(result, ncclInvalidUsage)
+            << "Merging " << kOverLimit << " devices must be rejected (limit is "
+            << kMaxDevsPerNic << ")";
 
         // Device count should NOT have changed
         int ndevAfter = 0;
@@ -1765,7 +2030,7 @@ TEST_F(NetIbMPITest, Reconnect_VNic) {
 
         if (rank == 1) {
             // Fill with cycle-specific pattern.
-            FillHostBuffer(buffer, bufferSize, seed);
+            fillHostBufferWithPattern<uint8_t>(buffer, bufferSize, makeBytePattern(seed));
             PostSendWithRetry(pair.sendComm, buffer, bufferSize, tag, mhandle, &request);
         } else {
             memset(buffer, 0, bufferSize);
@@ -1780,7 +2045,7 @@ TEST_F(NetIbMPITest, Reconnect_VNic) {
         // Verify received data matches the cycle-specific pattern.
         if (rank == 0) {
             ASSERT_EQ(sizes[0], bufferSize) << "Cycle " << cycle << ": received size mismatch";
-            ASSERT_TRUE(VerifyHostBuffer(buffer, bufferSize, seed)) << "Cycle " << cycle << ": data verification failed";
+            ASSERT_TRUE(verifyHostBufferData<uint8_t>(buffer, bufferSize, makeBytePattern(seed))) << "Cycle " << cycle << ": data verification failed";
         }
 
         MPI_Barrier(MPI_COMM_WORLD);
@@ -1803,6 +2068,194 @@ TEST_F(NetIbMPITest, Reconnect_VNic) {
         // Sync before next cycle to ensure both ranks have fully torn down.
         MPI_Barrier(MPI_COMM_WORLD);
     }
+}
+
+TEST_F(NetIbMPITest, MultiRecvGPUShuffled) {
+    ASSERT_TRUE(validateTestPrerequisites(kExactTwoProcesses, kExactTwoProcesses,
+                                         false, kMinGpusPerNode, kNoNodeLimit))
+        << "Test requires exactly 2 processes";
+
+    int rank = MPIEnvironment::world_rank;
+    int peerRank = (rank + 1) % 2;
+
+    ASSERT_EQ(InitNetIb(), ncclSuccess);
+
+    int dev = CreateMergedDevice(3);
+    if (dev == -1) {
+        GTEST_SKIP() << mergeSkipReason_;
+    }
+
+    {
+        ncclNetProperties_t props = {};
+        ASSERT_EQ(GetDeviceProperties(dev, &props), ncclSuccess);
+        if (!(props.ptrSupport & NCCL_PTR_CUDA)) {
+            GTEST_SKIP() << "GDR not supported on this device, skipping GPU MultiRecv test";
+        }
+    }
+
+    static constexpr int kWidth = 8;
+    static constexpr int kNumBatches = 255;
+    static constexpr int kBaseTag = 16000;
+    static constexpr int kTagStride = 100;
+    // Keep sizes modest to limit GPU memory allocation per batch
+    static constexpr size_t kBaseSizes[kWidth] = {
+        64, 256, 1024, 4096, 16384, 65536, 131072, 262144
+    };
+
+    // kRecvOrder[slot] = msgId posted at that recv slot
+    static constexpr int kRecvOrder[kWidth] = {3, 0, 6, 1, 7, 2, 5, 4};
+    // kSendOrder[issueIndex] = msgId to send at that issue position
+    static constexpr int kSendOrder[kWidth] = {5, 2, 7, 0, 6, 3, 1, 4};
+
+    // Patterns keyed by msgId (same formula as MultiRecvShuffled for consistency)
+    auto FillPattern = [&](uint8_t* hostBuf, size_t size, int batch, int msgId) {
+        fillHostBufferWithPattern<uint8_t>(hostBuf, size, [batch, msgId](size_t j) {
+            return static_cast<uint8_t>((batch * 19 + msgId * 37 + j) % 256);
+        });
+    };
+
+    auto CheckPattern = [&](const uint8_t* hostBuf, size_t size, int batch, int msgId) -> bool {
+        return verifyHostBufferData<uint8_t>(hostBuf, size, [batch, msgId](size_t j) {
+            return static_cast<uint8_t>((batch * 19 + msgId * 37 + j) % 256);
+        });
+    };
+
+    ConnectionPair pair;
+    ASSERT_EQ(SetupConnection(dev, pair, rank, peerRank), ncclSuccess);
+    void* recvComm = pair.recvComm;
+    void* sendComm = pair.sendComm;
+
+    NetConnectionGuard connGuard(net_);
+    if (rank == 0) {
+        connGuard.setRecvComm(pair.recvComm);
+        connGuard.setListenComm(pair.listenComm);
+    } else {
+        connGuard.setSendComm(pair.sendComm);
+    }
+
+    for (int batch = 0; batch < kNumBatches; batch++) {
+        int msgTags[kWidth];
+        size_t msgSizes[kWidth];
+        for (int msgId = 0; msgId < kWidth; msgId++) {
+            msgTags[msgId] = kBaseTag + batch * kTagStride + msgId;
+            msgSizes[msgId] = kBaseSizes[msgId];
+        }
+
+        if (rank == 0) {
+            void* gpuBufs[kWidth] = {};
+            void* mhs[kWidth] = {};
+            size_t recvSizesArg[kWidth];
+            int recvTags[kWidth];
+            int recvSizesOut[kWidth] = {};
+
+            auto cleanup = makeScopeGuard([&]() {
+                for (int i = 0; i < kWidth; i++) {
+                    if (mhs[i]) { DeregisterMemory(recvComm, mhs[i]); mhs[i] = nullptr; }
+                    if (gpuBufs[i]) { hipFreeWrapper(gpuBufs[i]); gpuBufs[i] = nullptr; }
+                }
+            });
+
+            for (int slot = 0; slot < kWidth; slot++) {
+                int msgId = kRecvOrder[slot];
+                recvTags[slot] = msgTags[msgId];
+                recvSizesArg[slot] = msgSizes[msgId];
+
+                HIP_TEST_CHECK_GTEST_FAIL(hipMalloc(&gpuBufs[slot], recvSizesArg[slot]));
+                HIP_TEST_CHECK_GTEST_FAIL(hipMemset(gpuBufs[slot], 0xCC, recvSizesArg[slot]));
+
+                ASSERT_EQ(RegisterMemory(recvComm, gpuBufs[slot], recvSizesArg[slot],
+                                         NCCL_PTR_CUDA, &mhs[slot]),
+                          ncclSuccess)
+                    << "GPU RegisterMemory failed for recv batch=" << batch << " slot=" << slot;
+                ASSERT_NE(mhs[slot], nullptr);
+            }
+
+            void* req = nullptr;
+            ASSERT_EQ(PostRecv(recvComm, kWidth, gpuBufs, recvSizesArg, recvTags, mhs, &req),
+                      ncclSuccess)
+                << "PostRecv failed for batch=" << batch;
+            ASSERT_NE(req, nullptr) << "PostRecv returned null request for batch=" << batch;
+
+            MPI_Barrier(MPI_COMM_WORLD);
+
+            ASSERT_EQ(WaitForCompletion(req, recvSizesOut, kLargeTransferTimeoutMs), ncclSuccess)
+                << "WaitForCompletion failed for recv batch=" << batch;
+
+            for (int slot = 0; slot < kWidth; slot++) {
+                int msgId = kRecvOrder[slot];
+                EXPECT_EQ(recvSizesOut[slot], static_cast<int>(msgSizes[msgId]))
+                    << "recv size mismatch at batch=" << batch
+                    << " slot=" << slot << " msgId=" << msgId;
+
+                std::vector<uint8_t> hostBuf(msgSizes[msgId]);
+                HIP_TEST_CHECK_GTEST_FAIL(
+                    hipMemcpy(hostBuf.data(), gpuBufs[slot], msgSizes[msgId],
+                              hipMemcpyDeviceToHost));
+
+                EXPECT_TRUE(CheckPattern(hostBuf.data(), msgSizes[msgId], batch, msgId))
+                    << "data mismatch at batch=" << batch
+                    << " slot=" << slot << " expected msgId=" << msgId
+                    << " tag=" << msgTags[msgId] << " size=" << msgSizes[msgId];
+            }
+
+            // cleanup guard fires here, deregistering MRs and freeing GPU buffers
+        } else {
+            void* gpuBufs[kWidth] = {};
+            void* mhs[kWidth] = {};
+            void* reqs[kWidth] = {};
+
+            auto cleanup = makeScopeGuard([&]() {
+                for (int i = 0; i < kWidth; i++) {
+                    if (mhs[i]) { DeregisterMemory(sendComm, mhs[i]); mhs[i] = nullptr; }
+                    if (gpuBufs[i]) { hipFreeWrapper(gpuBufs[i]); gpuBufs[i] = nullptr; }
+                }
+            });
+
+            for (int msgId = 0; msgId < kWidth; msgId++) {
+                HIP_TEST_CHECK_GTEST_FAIL(hipMalloc(&gpuBufs[msgId], msgSizes[msgId]));
+
+                std::vector<uint8_t> hostBuf(msgSizes[msgId]);
+                FillPattern(hostBuf.data(), msgSizes[msgId], batch, msgId);
+                HIP_TEST_CHECK_GTEST_FAIL(
+                    hipMemcpy(gpuBufs[msgId], hostBuf.data(), msgSizes[msgId],
+                              hipMemcpyHostToDevice));
+
+                ASSERT_EQ(RegisterMemory(sendComm, gpuBufs[msgId], msgSizes[msgId],
+                                         NCCL_PTR_CUDA, &mhs[msgId]),
+                          ncclSuccess)
+                    << "GPU RegisterMemory failed for send batch=" << batch
+                    << " msgId=" << msgId;
+                ASSERT_NE(mhs[msgId], nullptr);
+            }
+
+            MPI_Barrier(MPI_COMM_WORLD);
+
+            for (int oi = 0; oi < kWidth; oi++) {
+                int msgId = kSendOrder[oi];
+                reqs[msgId] = nullptr;
+                PostSendWithRetry(sendComm, gpuBufs[msgId], msgSizes[msgId],
+                                  msgTags[msgId], mhs[msgId], &reqs[msgId]);
+
+                ASSERT_NE(reqs[msgId], nullptr)
+                    << "PostSend returned null request for batch=" << batch
+                    << " msgId=" << msgId;
+            }
+
+            for (int msgId = 0; msgId < kWidth; msgId++) {
+                int sentSize[1] = {0}; // send request yields one size entry
+                ASSERT_EQ(WaitForCompletion(reqs[msgId], sentSize, kLargeTransferTimeoutMs),
+                          ncclSuccess)
+                    << "send completion failed for batch=" << batch << " msgId=" << msgId;
+            }
+
+            // cleanup guard fires here, deregistering MRs and freeing GPU buffers
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    // connGuard closes comms on scope exit
 }
 
 #endif // MPI_TESTS_ENABLED

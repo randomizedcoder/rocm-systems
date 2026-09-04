@@ -6,6 +6,8 @@
 #include "binary/dwarf_entry.hpp"
 #include "binary/symbol.hpp"
 #include "common/defines.h"
+#include "common/env_vars.hpp"
+#include "common/path.hpp"
 #include "core/config.hpp"
 #include "core/demangler.hpp"
 #include "core/state.hpp"
@@ -17,6 +19,7 @@
 #include "library/thread_data.hpp"
 #include "library/thread_info.hpp"
 #include "library/tracing.hpp"
+#include <cstdint>
 
 #include <timemory/components/timing/backends.hpp>
 #include <timemory/hash/types.hpp>
@@ -25,7 +28,6 @@
 #include <timemory/tpls/cereal/cereal.hpp>
 #include <timemory/tpls/cereal/cereal/archives/json.hpp>
 #include <timemory/tpls/cereal/types.hpp>
-#include <timemory/units.hpp>
 #include <timemory/unwind/dlinfo.hpp>
 
 #include "logger/debug.hpp"
@@ -46,17 +48,18 @@ namespace
 using backtrace_causal = rocprofsys::causal::component::backtrace;
 namespace cereal       = ::tim::cereal;
 
-auto    current_experiment_value  = experiment{};
-auto    current_selected_count    = std::atomic<uint64_t>{ 0 };
-auto    current_experiment        = std::atomic<experiment*>{ nullptr };
-auto    experiment_history        = std::vector<experiment>{};
-int64_t global_scaling            = 1;
-int64_t global_scaling_increments = 0;
-bool    use_exp_speedup_scaling =
-    get_env<bool>("ROCPROFSYS_CAUSAL_SCALE_EXPERIMENT_TIME_BY_SPEEDUP", false);
+auto         current_experiment_value  = experiment{};
+auto         current_selected_count    = std::atomic<std::uint64_t>{ 0 };
+auto         current_experiment        = std::atomic<experiment*>{ nullptr };
+auto         experiment_history        = std::vector<experiment>{};
+std::int64_t global_scaling            = 1;
+std::int64_t global_scaling_increments = 0;
+bool         use_exp_speedup_scaling =
+    get_env<bool>(env_vars::CAUSAL_SCALE_EXPERIMENT_TIME_BY_SPEEDUP, false);
+constexpr auto k_ss_duration_width = 5;
 }  // namespace
 
-experiment::sample::sample(const base_type& _b, uint64_t _c)
+experiment::sample::sample(const base_type& _b, std::uint64_t _c)
 : base_type{ _b }
 , count{ _c }
 {
@@ -220,7 +223,7 @@ experiment::start()
     if(!selection) return false;
 
     // sampling period in nanoseconds
-    sampling_period = backtrace_causal::get_period(units::nsec);
+    sampling_period = backtrace_causal::get_period();
 
     // experiment time is scaled up for longer speedups
     index           = experiment_history.size() + 1;
@@ -236,7 +239,7 @@ experiment::start()
 
     LOG_INFO("Starting causal experiment #{}: {}", index, as_string());
 
-    if(get_state() < State::Finalized)
+    if(state::process::get() < state::process::Finalized)
     {
         current_experiment_value = *this;
         current_selected_count.store(0);
@@ -252,8 +255,8 @@ experiment::wait() const
     auto _now  = tracing::now();
     auto _wait = experiment_time - (_now - start_time);
     auto _end  = _now + _wait;
-    auto _incr = std::min<uint64_t>(_wait / 100, 1000000);
-    while(tracing::now() < _end && get_state() < State::Finalized)
+    auto _incr = std::min<std::uint64_t>(_wait / 100, 1000000);
+    while(tracing::now() < _end && state::process::get() < state::process::Finalized)
     {
         std::this_thread::yield();
         std::this_thread::sleep_for(std::chrono::nanoseconds{ _incr });
@@ -281,13 +284,13 @@ experiment::stop()
     delay::sync();
 
     auto _prog_stats = tim::statistics<double>{};
-    auto _prog_vals  = std::vector<int64_t>{};
+    auto _prog_vals  = std::vector<std::int64_t>{};
     _prog_vals.reserve(fini_progress.size());
     for(auto fitr : fini_progress)
     {
-        auto    _pt = fitr.second - init_progress[fitr.first];
-        int64_t _num =
-            std::max<int64_t>({ _pt.get_laps(), _pt.get_arrival(), _pt.get_departure() });
+        auto               _pt  = fitr.second - init_progress[fitr.first];
+        const std::int64_t _num = std::max<std::int64_t>(
+            { _pt.get_laps(), _pt.get_arrival(), _pt.get_departure() });
         if(_num > 0) _prog_vals.emplace_back(_num);
     }
     std::sort(_prog_vals.begin(), _prog_vals.end());
@@ -341,18 +344,24 @@ std::string
 experiment::as_string() const
 {
     std::stringstream _ss{};
-    auto _dur = static_cast<double>(experiment_time) / static_cast<double>(units::sec);
+    const auto        dur = std::chrono::duration<double>{
+        std::chrono::nanoseconds{ experiment_time }
+    }.count();
     _ss << std::boolalpha << "speed-up: " << std::setw(3) << virtual_speedup
         << "%, period: " << std::setw(4) << std::fixed << std::setprecision(2)
-        << (sampling_period / static_cast<double>(units::msec)) << " msec";
+        << std::chrono::duration<double,
+                                 std::milli>{ std::chrono::duration<double, std::nano>{
+                                                  static_cast<double>(sampling_period) } }
+               .count()
+        << " msec";
     if(!config::get_causal_end_to_end())
-        _ss << ", duration: " << std::setw(5) << std::fixed << std::setprecision(3)
-            << _dur << " sec";
+        _ss << ", duration: " << std::setw(k_ss_duration_width) << std::fixed
+            << std::setprecision(3) << dur << " sec";
     _ss << " :: experiment: " << fmt::format("0x{:X}", selection.address) << " ";
     if(selection.symbol_address > 0 && selection.address != selection.symbol_address)
         _ss << "(symbol@" << fmt::format("0x{:X}", selection.symbol_address) << ") ";
     if(!selection.symbol.file.empty() && selection.symbol.line > 0)
-        _ss << "[" << filepath::basename(selection.symbol.file) << ":"
+        _ss << "[" << path::filename(selection.symbol.file) << ":"
             << selection.symbol.line << "]";
 
     auto _patch = [](std::string _v) {
@@ -376,7 +385,7 @@ experiment::as_string() const
 }
 
 // in nanoseconds
-uint64_t
+std::uint64_t
 experiment::get_delay()
 {
     if(!current_experiment.load()) return 0;
@@ -390,7 +399,7 @@ experiment::get_delay_scaling()
     return current_experiment_value.delay_scaling;
 }
 
-uint32_t
+std::uint32_t
 experiment::get_index()
 {
     if(!is_active()) return 0;
@@ -404,7 +413,7 @@ experiment::is_active()
 }
 
 bool
-experiment::is_selected(uint64_t _addr)
+experiment::is_selected(std::uint64_t _addr)
 {
     return (is_active() && current_experiment_value.selection.contains(_addr));
 }
@@ -421,7 +430,7 @@ experiment::is_selected(unwind_addr_t _stack)
 }
 
 bool
-experiment::is_selected(container::c_array<uint64_t> _stack)
+experiment::is_selected(container::c_array<std::uint64_t> _stack)
 {
     if(is_active())
     {
@@ -473,14 +482,14 @@ experiment::save_experiments(std::string _fname_base, const filename_config_t& _
 
     // update runtime value
     {
-        uint64_t _beg_runtime = std::numeric_limits<uint64_t>::max();
-        uint64_t _end_runtime = std::numeric_limits<uint64_t>::min();
+        std::uint64_t _beg_runtime = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t _end_runtime = std::numeric_limits<std::uint64_t>::min();
         for(auto& itr : current_record.experiments)
         {
             if(itr.duration == 0) continue;
             if(itr.experiment_time == 0) continue;
-            _beg_runtime = std::min<uint64_t>(_beg_runtime, itr.start_time);
-            _end_runtime = std::max<uint64_t>(_end_runtime, itr.end_time);
+            _beg_runtime = std::min<std::uint64_t>(_beg_runtime, itr.start_time);
+            _end_runtime = std::max<std::uint64_t>(_end_runtime, itr.end_time);
         }
         current_record.runtime = (_end_runtime - _beg_runtime);
     }
@@ -515,8 +524,9 @@ experiment::save_experiments(std::string _fname_base, const filename_config_t& _
         save_line_info(_binfo_cfg, config::get_verbose());
     }
 
-    bool _causal_output_reset =
-        config::get_setting_value<bool>("ROCPROFSYS_CAUSAL_FILE_RESET").value_or(false);
+    const bool _causal_output_reset =
+        config::get_setting_value<bool>(std::string{ env_vars::CAUSAL_FILE_RESET })
+            .value_or(false);
 
     {
         auto _saved_experiments = (_causal_output_reset)
@@ -587,7 +597,7 @@ experiment::save_experiments(std::string _fname_base, const filename_config_t& _
             auto& _selection = itr.selection;
             auto& _line_info = _selection.symbol;
 
-            std::string _name =
+            const std::string _name =
                 (_selection.symbol_address > 0)
                     ? _line_info.func
                     : fmt::format("{}:{}", _line_info.file, _line_info.line);
@@ -627,7 +637,8 @@ experiment::save_experiments(std::string _fname_base, const filename_config_t& _
                 if(pitr.second.is_latency_point())
                 {
                     if(get_causal_end_to_end()) continue;
-                    auto _delta = std::max<int64_t>(pitr.second.get_latency_delta(), 1);
+                    auto _delta =
+                        std::max<std::int64_t>(pitr.second.get_latency_delta(), 1);
                     ofs << "latency-point\tname="
                         << rocprofsys::utility::demangle(
                                tim::get_hash_identifier(pitr.first))

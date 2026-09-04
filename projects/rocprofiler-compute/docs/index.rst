@@ -1,10 +1,11 @@
 .. meta::
    :description: ROCm Compute Profiler documentation and reference
-   :keywords: Omniperf, ROCm, profiler, tool, Instinct, GPUs, accelerator, AMD
+   :keywords: Omniperf, ROCm, profiler, tool, Instinct, GPUs, accelerator, AMD,
+              ROCm Optiq, graphical analysis
 
-***********************************
-ROCm Compute Profiler documentation
-***********************************
+*******************************************
+ROCm Compute Profiler (rocprofiler-compute)
+*******************************************
 
 This documentation provides a comprehensive overview of the ROCm Compute
 Profiler tool. In addition to a full deployment guide with installation
@@ -26,11 +27,15 @@ ROCm Compute Profiler is open source and hosted at `<https://github.com/ROCm/roc
 
    .. grid-item-card:: Install
 
-      * :doc:`Installation and deployment <install/core-install>`
+      * :doc:`Install ROCm Compute Profiler <install/core-install>`
+
+      * :doc:`Install from source <install/source-install>`
 
       * :doc:`Quickstart <install/quickstart>`
 
-   .. grid-item::
+   .. grid-item-card:: Quick reference
+
+      * :doc:`ROCm Compute Profiler at a glance <quick-reference/rocprofiler-compute-at-a-glance>`
 
 Use the following topics to learn more about the advantages of ROCm Compute Profiler in your
 development toolkit, how it aims to model performance, and how to use ROCm Compute Profiler
@@ -56,6 +61,8 @@ in practice.
 
         * :doc:`how-to/analyze/tui`
 
+        * :doc:`how-to/analyze/optiq`
+
    .. grid-item-card:: Conceptual
 
       * :doc:`conceptual/performance-model`
@@ -76,17 +83,23 @@ in practice.
 
           * :doc:`conceptual/rdna/system-speed-of-light`
 
-          * :doc:`conceptual/rdna/wgp`
+          * :doc:`conceptual/rdna/shader-engine`
 
-          * :doc:`conceptual/rdna/tcp-cache`
+            * :doc:`conceptual/rdna/spi`
 
-          * :doc:`conceptual/rdna/gl1-cache`
+            * :doc:`conceptual/rdna/wgp`
+
+            * :doc:`conceptual/rdna/gl0-cache`
+
+            * :doc:`conceptual/rdna/gl1-cache`
 
           * :doc:`conceptual/rdna/gl2-cache`
 
-          * :doc:`conceptual/rdna/shader-engine`
+          * :doc:`conceptual/rdna/gcea`
 
           * :doc:`conceptual/rdna/command-processor`
+
+          * :doc:`conceptual/rdna/grbm`
 
           * :doc:`conceptual/rdna/references`
 
