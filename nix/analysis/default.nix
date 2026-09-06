@@ -33,7 +33,7 @@ let
 
   # C/C++ full-build tools
   gcc-warnings = import ./tools/gcc-warnings.nix { inherit pkgs lib src analysisLib; };
-  gcc-analyzer = import ./tools/gcc-analyzer.nix { inherit pkgs lib src analysisLib; };
+  gcc-analyzer = import ./tools/gcc-analyzer.nix { inherit pkgs lib src analysisLib compileDb; };
 
   # GPU-specific
   hip-check = import ./tools/hip-check.nix { inherit pkgs lib src analysisLib; };

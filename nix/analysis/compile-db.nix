@@ -12,6 +12,37 @@
 { pkgs, lib, src, projects }:
 
 let
+  # Common third-party dev headers many ROCm subprojects need. Provisioning
+  # these (a) lets dep-light projects actually cmake-configure and (b) raises
+  # synthetic-DB parse coverage so the path-sensitive analyzers see real code
+  # instead of dying on a missing include.
+  commonDeps = with pkgs; [
+    libmnl msgpack-cxx zstd numactl libdrm boost gtest
+    elfutils pciutils ncurses openssl
+  ];
+
+  # -isystem flags for the provisioned deps, injected into every synthetic
+  # entry so clang/gcc resolve their headers without a full SDK.
+  depIncludeFlags =
+    lib.concatMapStringsSep " " (d: "-isystem ${lib.getDev d}/include") commonDeps;
+
+  # In-tree HIP platform includes + libdrm subdirs (best-effort; nonexistent
+  # -I dirs are harmless).
+  hipIncludeFlags = lib.concatStringsSep " " [
+    "-I${src}/projects/clr/hipamd/include"
+    "-I${src}/projects/clr/rocclr/include"
+    "-I${src}/projects/clr/hipamd/include/hip"
+    "-isystem ${lib.getDev pkgs.libdrm}/include/libdrm"
+    "-isystem ${lib.getDev pkgs.libdrm}/include/drm"
+  ];
+
+  # HIP compiles behind the AMD platform macros; -ferror-limit=0 lets clang keep
+  # analysing past still-unresolved *external* headers instead of bailing at the
+  # first fatal. (gcc-analyzer strips clang-only -f flags when it re-drives.)
+  extraSyntheticFlags =
+    "-D__HIP_PLATFORM_AMD__=1 -D__HIP_PLATFORM_HCC__=1 -ferror-limit=0 "
+    + "${depIncludeFlags} ${hipIncludeFlags}";
+
   # Python script to generate a synthetic compile_commands.json
   # for projects where cmake configure fails (missing ROCm deps, etc.).
   syntheticDbScript = pkgs.writeText "synthetic-compile-db.py" ''
@@ -23,6 +54,7 @@ let
     source_dir = sys.argv[1]
     output_file = sys.argv[2]
     cpp_standard = sys.argv[3] if len(sys.argv) > 3 else "c++17"
+    extra_flags = sys.argv[4] if len(sys.argv) > 4 else ""
 
     extensions = {
         '.c': 'c',
@@ -32,49 +64,65 @@ let
         '.hip': 'hip',
         '.cu': 'cuda',
     }
+    header_exts = ('.h', '.hh', '.hpp', '.hxx', '.inc', '.cuh', '.ipp', '.tcc')
 
     # Directories to skip
     skip_dirs = {'build', '_build', 'third_party', '.git', '__pycache__'}
 
-    entries = []
+    # Single walk: collect every directory that holds a header (for -I
+    # resolution of the file's own siblings/project headers) and every source
+    # file to emit an entry for.
+    header_dirs = set()
+    source_files = []
     for root, dirs, files in os.walk(source_dir):
         # Prune excluded directories
         dirs[:] = [d for d in dirs if d not in skip_dirs]
 
         for f in files:
             _, ext = os.path.splitext(f)
-            if ext not in extensions:
-                continue
+            if ext in header_exts:
+                header_dirs.add(root)
+            if ext in extensions:
+                source_files.append((root, f, ext))
 
-            filepath = os.path.join(root, f)
-            lang = extensions[ext]
+    proj_includes = ' '.join(f'-I{d}' for d in sorted(header_dirs))
+    base_includes = f'-I{source_dir} -I{source_dir}/include -I{source_dir}/src'
 
-            if lang == 'c':
-                std_flag = '-std=c11'
-                lang_flag = '-x c'
-            elif lang == 'hip':
-                std_flag = f'-std={cpp_standard}'
-                lang_flag = '-x hip'
-            elif lang == 'cuda':
-                std_flag = f'-std={cpp_standard}'
-                lang_flag = '-x cuda'
-            else:
-                std_flag = f'-std={cpp_standard}'
-                lang_flag = '-x c++'
+    entries = []
+    for root, f, ext in source_files:
+        filepath = os.path.join(root, f)
+        lang = extensions[ext]
 
-            # Include the project's own directories for header resolution
-            include_flags = f'-I{source_dir} -I{source_dir}/include -I{source_dir}/src'
+        if lang == 'c':
+            std_flag = '-std=c11'
+            lang_flag = '-x c'
+        elif lang == 'hip':
+            std_flag = f'-std={cpp_standard}'
+            lang_flag = '-x hip'
+        elif lang == 'cuda':
+            std_flag = f'-std={cpp_standard}'
+            lang_flag = '-x cuda'
+        else:
+            std_flag = f'-std={cpp_standard}'
+            lang_flag = '-x c++'
 
-            entries.append({
-                'directory': source_dir,
-                'file': filepath,
-                'command': f'clang++ {lang_flag} {std_flag} {include_flags} -c {filepath}',
-            })
+        command = (
+            f'clang++ {lang_flag} {std_flag} '
+            f'{base_includes} {proj_includes} {extra_flags} -c {filepath}'
+        )
+        entries.append({
+            'directory': source_dir,
+            'file': filepath,
+            'command': command,
+        })
 
     with open(output_file, 'w') as fh:
         json.dump(entries, fh, indent=2)
 
-    print(f"Generated synthetic compile_commands.json with {len(entries)} entries")
+    print(
+        f"Generated synthetic compile_commands.json with {len(entries)} entries "
+        f"({len(header_dirs)} include dirs)"
+    )
   '';
 
   # Python script to merge multiple compile_commands.json files.
@@ -116,7 +164,7 @@ let
   # Falls back to synthetic generation if cmake configure fails.
   mkProjectCompileDb = project:
     pkgs.runCommand "compile-db-${project.name}" {
-      nativeBuildInputs = with pkgs; [ cmake python3 gnumake ];
+      nativeBuildInputs = (with pkgs; [ cmake python3 gnumake pkg-config ]) ++ commonDeps;
     } ''
       mkdir -p $out
 
@@ -140,13 +188,13 @@ let
         else
           echo "cmake configured but no compile_commands.json found, using synthetic"
           ${pkgs.python3}/bin/python3 ${syntheticDbScript} \
-            ${project.path} $out/compile_commands.json
+            ${project.path} $out/compile_commands.json c++17 "${extraSyntheticFlags}"
           echo "synthetic" > $out/method.txt
         fi
       else
         echo "cmake configure failed, using synthetic compile_commands.json"
         ${pkgs.python3}/bin/python3 ${syntheticDbScript} \
-          ${project.path} $out/compile_commands.json
+          ${project.path} $out/compile_commands.json c++17 "${extraSyntheticFlags}"
         echo "synthetic" > $out/method.txt
       fi
     '';
