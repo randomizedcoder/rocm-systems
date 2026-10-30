@@ -17,8 +17,6 @@ let
 
       echo "=== Rust Clippy Analysis ==="
 
-      total_findings=0
-
       # Find Cargo.toml files to locate Rust projects
       find "$source_dir" \
         -name 'Cargo.toml' \

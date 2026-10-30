@@ -18,8 +18,6 @@ let
 
       echo "=== GCC Extended Warnings Analysis ==="
 
-      total_findings=0
-
       # Try to build each project with extended warnings.
       # Projects that fail cmake configure are skipped.
       for project_dir in "$source_dir"/experimental/perf-dkms "$source_dir"/shared/kpack; do
