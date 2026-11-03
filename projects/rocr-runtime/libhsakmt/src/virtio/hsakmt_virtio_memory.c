@@ -1206,8 +1206,9 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtRegisterSharedHandleToNodes(
   memcpy(&req->register_shared_handle_args.SharedMemoryHandle, SharedMemoryHandle,
          sizeof(HsaSharedMemoryHandle));
 
-  vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  r = vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
   free(req);
+  if (r) return r;
   if (rsp->ret) return rsp->ret;
 
   if (!rsp->register_shared_handle_rsp.memory_handle || !rsp->register_shared_handle_rsp.size)
@@ -1287,6 +1288,7 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtSVMGetAttr(void* start_addr, HSAuint64 size, unsi
   size_t req_len = sizeof(struct vhsakmt_ccmd_memory_req) + nattr * sizeof(HSA_SVM_ATTRIBUTE);
   size_t rsp_len = sizeof(struct vhsakmt_ccmd_memory_rsp) + nattr * sizeof(HSA_SVM_ATTRIBUTE);
   struct vhsakmt_ccmd_memory_req* req;
+  int r;
 
   bo = vhsakmt_find_bo_by_addr(dev, start_addr);
   if (!bo) return HSAKMT_STATUS_INVALID_HANDLE;
@@ -1308,8 +1310,9 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtSVMGetAttr(void* start_addr, HSAuint64 size, unsi
 
   memcpy(req->payload, attrs, nattr * sizeof(HSA_SVM_ATTRIBUTE));
 
-  vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  r = vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
   free(req);
+  if (r) return r;
   if (rsp->ret) return rsp->ret;
 
   memcpy(attrs, rsp->payload, nattr * sizeof(HSA_SVM_ATTRIBUTE));
@@ -1326,6 +1329,7 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtSVMSetAttr(void* start_addr, HSAuint64 size, unsi
   struct vhsakmt_ccmd_memory_rsp* rsp;
   size_t req_len = sizeof(struct vhsakmt_ccmd_memory_req) + nattr * sizeof(HSA_SVM_ATTRIBUTE);
   struct vhsakmt_ccmd_memory_req* req;
+  int r;
 
   bo = vhsakmt_find_bo_by_addr(dev, start_addr);
   if (!bo) return HSAKMT_STATUS_INVALID_HANDLE;
@@ -1347,8 +1351,9 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtSVMSetAttr(void* start_addr, HSAuint64 size, unsi
     return -ENOMEM;
   }
 
-  vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  r = vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
   free(req);
+  if (r) return r;
   if (rsp->ret) return rsp->ret;
 
   return rsp->ret;
