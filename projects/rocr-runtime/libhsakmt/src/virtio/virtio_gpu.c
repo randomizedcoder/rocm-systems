@@ -211,10 +211,14 @@ static int virtio_gpu_flush_locked(struct virtio_gpu_device* vgdev, int* fence) 
 }
 
 static int virtio_gpu_add_cmd(struct virtio_gpu_device* vgdev, struct virtio_gpu_ccmd_req* req) {
-  req->seqno = ++vgdev->next_seqno;
   int r;
 
-  if (vgdev->reqbuf_len + req->len > sizeof(vgdev->reqbuf)) {
+  /* reqbuf is allocated with SHMEM_SZ bytes in virtio_gpu_init(). */
+  if (req->len > SHMEM_SZ) return -EINVAL;
+
+  req->seqno = ++vgdev->next_seqno;
+
+  if (req->len > SHMEM_SZ - vgdev->reqbuf_len) {
     r = virtio_gpu_flush_locked(vgdev, NULL);
     if (r) return r;
   }

@@ -424,6 +424,7 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtMapMemoryToGPUNodes(void* MemoryAddress, HSAuint6
   struct vhsakmt_ccmd_memory_rsp* rsp;
   vhsakmt_bo_handle bo;
   uint64_t addr_offset = 0;
+  int r;
 
   req = (void*)calloc(1, req_len);
   if (!req) return -ENOMEM;
@@ -461,7 +462,11 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtMapMemoryToGPUNodes(void* MemoryAddress, HSAuint6
     return -ENOMEM;
   }
 
-  vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  r = vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  if (r) {
+    free(req);
+    return r;
+  }
   if (rsp->ret) {
     free(req);
     return rsp->ret;
