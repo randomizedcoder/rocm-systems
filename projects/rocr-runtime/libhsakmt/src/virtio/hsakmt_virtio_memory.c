@@ -1039,7 +1039,11 @@ HSAKMT_STATUS HSAKMTAPI vhsaKmtRegisterGraphicsHandleToNodesExt(
     goto free_out;
   }
 
-  vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  r = vhsakmt_execbuf_cpu(dev, &req->hdr, __FUNCTION__);
+  if (r) {
+    free(req);
+    return r;
+  }
   if (rsp->ret) {
     free(req);
     return rsp->ret;
