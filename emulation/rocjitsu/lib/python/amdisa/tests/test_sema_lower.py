@@ -65,24 +65,31 @@ def test_non_scc_inline_operation_has_no_scc_effect():
     ('callee', 'ty', 'expected', 'unexpected'),
     [
         ('maxmin', SemaType.I32, 'std::min(std::max(', 'std::fmin'),
+        ('minmax', SemaType.I32, 'std::max(std::min(', 'std::fmax'),
+        ('maxmin', SemaType.U32, 'std::min(std::max(', 'std::fmin'),
         ('minmax', SemaType.U32, 'std::max(std::min(', 'std::fmax'),
         ('maxmin', SemaType.F32, 'std::fmin(std::fmax(', 'std::min'),
         ('minmax', SemaType.F32, 'std::fmax(std::fmin(', 'std::max'),
     ],
 )
-def test_minmax_ternary_lowering_uses_result_type(callee, ty, expected, unexpected):
+@pytest.mark.parametrize('full_block', [False, True])
+def test_minmax_ternary_lowering_uses_result_type(
+    callee, ty, expected, unexpected, full_block
+):
     node = SemaNode(
         SemaNodeKind.CALL,
         call_name=callee,
         ty=ty,
         children=(
             SemaNode(SemaNodeKind.ID, id_name=callee),
-            SemaNode(SemaNodeKind.LIT, lit_value='a', ty=ty),
-            SemaNode(SemaNodeKind.LIT, lit_value='b', ty=ty),
-            SemaNode(SemaNodeKind.LIT, lit_value='c', ty=ty),
+            *(_cast(_src(i), ty) for i in range(3)),
         ),
     )
-    result = _lower_call(node, LoweringContext(exec_model=ExecModel.VECTOR))
+    if full_block:
+        body = SemaNode(SemaNodeKind.ASSIGN, children=(_cast(_dst(0), ty), node))
+        result = lower_sema_block(SemaBlock('V_TEST', ExecModel.VECTOR, body))
+    else:
+        result = _lower_call(node, LoweringContext(exec_model=ExecModel.VECTOR))
     assert expected in result
     assert unexpected not in result
 
@@ -336,6 +343,67 @@ class TestLowerVectorAdd:
 
         assert 'amdgpu::clamp_floating_result(v, wf)' in result
         assert 'std::clamp' not in result
+
+    def test_apply_clamp_omits_scope_for_helper_lowered_mul_legacy(self):
+        mul_legacy = SemaNode(
+            SemaNodeKind.CALL,
+            call_name='mul_legacy',
+            ty=SemaType.F32,
+            children=(
+                SemaNode(SemaNodeKind.ID, id_name='mul_legacy'),
+                SemaNode(SemaNodeKind.LIT, lit_value='0.5', ty=SemaType.F32),
+                SemaNode(SemaNodeKind.LIT, lit_value='2.0', ty=SemaType.F32),
+            ),
+        )
+        node = SemaNode(
+            SemaNodeKind.CALL,
+            call_name='apply_clamp',
+            ty=SemaType.F32,
+            children=(
+                SemaNode(SemaNodeKind.ID, id_name='apply_clamp'),
+                mul_legacy,
+            ),
+        )
+
+        result = _lower_apply_clamp(node, LoweringContext(exec_model=ExecModel.VECTOR))
+
+        # The vector MUL_LEGACY helper installs the guest rounding itself and
+        # CLAMP compares raw bits, so the lowering adds no scope of its own.
+        assert 'MUL_LEGACY' in result
+        assert 'ScopedFenv' not in result
+
+    def test_apply_clamp_scopes_inline_host_arithmetic(self):
+        divide = SemaNode(
+            SemaNodeKind.DIV,
+            ty=SemaType.F64,
+            children=(
+                SemaNode(SemaNodeKind.LIT, lit_value='1.0', ty=SemaType.F64),
+                SemaNode(SemaNodeKind.LIT, lit_value='3.0', ty=SemaType.F64),
+            ),
+        )
+        add = SemaNode(
+            SemaNodeKind.ADD,
+            ty=SemaType.F64,
+            children=(
+                SemaNode(SemaNodeKind.LIT, lit_value='0.5', ty=SemaType.F64),
+                divide,
+            ),
+        )
+        node = SemaNode(
+            SemaNodeKind.CALL,
+            call_name='apply_clamp',
+            ty=SemaType.F64,
+            children=(SemaNode(SemaNodeKind.ID, id_name='apply_clamp'), add),
+        )
+
+        result = _lower_apply_clamp(node, LoweringContext(exec_model=ExecModel.VECTOR))
+
+        # The division rounds inline on the host, so the operand still needs the
+        # guest rounding installed around it.
+        assert (
+            'amdgpu::fp_mode::detail::ScopedFenv environment('
+            'wf.fp_round_mode_f16_f64());' in result
+        )
 
     @pytest.mark.parametrize(
         ('result_type', 'expected_helper', 'expected_denorm_mode'),
@@ -1154,7 +1222,7 @@ class TestLowerControlFlow:
         )
         block = SemaBlock('TEST', ExecModel.SCALAR, body)
         result = lower_sema_block(block)
-        assert 'if (wf.read_scc())' in result
+        assert result == '  if (wf.read_scc()) {\n    uint32_t tmp = 1;\n  }'
 
     def test_if_else(self):
         body = SemaNode(
