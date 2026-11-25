@@ -19,12 +19,14 @@ let
 
       echo "=== include-what-you-use Analysis ==="
 
-      # Find source files
+      # Find source files. Capped at 8 jobs to bound memory; a per-file
+      # timeout stops one pathological TU from hanging the whole run.
+      jobs=$(( $(nproc) < 8 ? $(nproc) : 8 ))
       find "$source_dir" \
         -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) \
         ${excludes} \
-        -print0 | xargs -0 -P "$(nproc)" -I{} \
-      iwyu_tool.py -p "$compile_db" -- {} \
+        -print0 | xargs -0 -P "$jobs" -I{} \
+      timeout 600 iwyu_tool.py -p "$compile_db" -- {} \
         >> "$output_dir/report.txt" 2>&1 || true
 
       findings=$(grep -c 'should add\|should remove' "$output_dir/report.txt" || echo "0")
